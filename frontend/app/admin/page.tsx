@@ -48,7 +48,7 @@ export default function AdminPage() {
     try {
       // Direct upload to backend to bypass Next.js proxy body limits for large files
       // Use localhost:8000 which is exposed by Docker
-      const res = await axios.post(`http://localhost:8000/events/${eventId}/upload`, formData, {
+      const res = await axios.post(`http://127.0.0.1:8000/events/${eventId}/upload`, formData, {
         onUploadProgress: (progressEvent) => {
           // Calculate percentage safely
           const total = progressEvent.total || progressEvent.loaded;

@@ -8,7 +8,7 @@ import numpy as np
 from typing import List
 from celery import Celery
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi import FastAPI, Depends, HTTPException, UploadFile, File
+from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Request
 from fastapi.staticfiles import StaticFiles
 from insightface.app import FaceAnalysis
 from sqlalchemy.orm import Session
@@ -35,6 +35,12 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    logger.info(f"Incoming request: {request.method} {request.url}")
+    response = await call_next(request)
+    return response
 
 # Initialize InsightFace model globally for search
 app_face = FaceAnalysis(name='buffalo_l', providers=['CPUExecutionProvider'])

@@ -10,6 +10,7 @@ export default function Home() {
   const [results, setResults] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
   const [hasSearched, setHasSearched] = useState(false);
+  const [progress, setProgress] = useState(0);
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
@@ -26,6 +27,7 @@ export default function Home() {
     setLoading(true);
     setHasSearched(true);
     setResults([]);
+    setProgress(0);
     
     const formData = new FormData();
     formData.append("file", selectedFile);
@@ -33,7 +35,13 @@ export default function Home() {
     try {
       // Post directly to the backend to bypass the Next.js proxy, which can time out
       // or have issues with file uploads.
-      const response = await axios.post("http://localhost:8000/search", formData);
+      const response = await axios.post("http://127.0.0.1:8000/search", formData, {
+        onUploadProgress: (progressEvent) => {
+          const total = progressEvent.total || progressEvent.loaded;
+          const percentCompleted = Math.round((progressEvent.loaded * 100) / total);
+          setProgress(percentCompleted);
+        },
+      });
       setResults(response.data.matches);
     } catch (error) {
       console.error("Search failed", error);
@@ -45,7 +53,7 @@ export default function Home() {
 
   // Helper to resolve backend image paths to local URL
   // API returns /storage/events/..., mapped to http://localhost:8000/storage/...
-  const getImageUrl = (path: string) => `http://localhost:8000${path}`;
+  const getImageUrl = (path: string) => `http://127.0.0.1:8000${path}`;
 
   return (
     <main className="min-h-screen bg-slate-50 text-slate-800 font-sans">
@@ -104,6 +112,20 @@ export default function Home() {
               >
                 {loading ? "Scanning Gallery..." : "Find My Photos"}
               </button>
+
+              {loading && (
+                <div className="w-full mt-2">
+                  <div className="w-full bg-gray-200 rounded-full h-2.5">
+                    <div 
+                      className="bg-indigo-600 h-2.5 rounded-full transition-all duration-300" 
+                      style={{ width: `${progress}%` }}
+                    ></div>
+                  </div>
+                  <p className="text-xs text-center text-slate-500 mt-1">
+                    {progress < 100 ? `Uploading... ${progress}%` : "Analysing faces..."}
+                  </p>
+                </div>
+              )}
             </div>
           </div>
         </div>
