@@ -31,8 +31,9 @@ export default function Home() {
     formData.append("file", selectedFile);
 
     try {
-      // Post to Next.js API route which proxies to Backend
-      const response = await axios.post("/api/search", formData, {
+      // Post directly to the backend to bypass the Next.js proxy, which can time out
+      // or have issues with file uploads.
+      const response = await axios.post("http://localhost:8000/search", formData, {
         headers: { "Content-Type": "multipart/form-data" },
       });
       setResults(response.data.matches);

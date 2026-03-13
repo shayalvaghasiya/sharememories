@@ -22,6 +22,7 @@ export default function AdminPage() {
         event_date: new Date().toISOString(),
       });
       setEventId(res.data.event_id);
+      setEventName(""); // Clear input on success
     } catch (err: any) {
       console.error(err);
       setError(err.response?.data?.detail || "Failed to create event. Is the backend running?");
@@ -43,8 +44,9 @@ export default function AdminPage() {
     });
 
     try {
-      // Proxy request: /api/events/{id}/upload -> Backend: /events/{id}/upload
-      const res = await axios.post(`/api/events/${eventId}/upload`, formData, {
+      // Direct upload to backend to bypass Next.js proxy body limits for large files
+      // Use localhost:8000 which is exposed by Docker
+      const res = await axios.post(`http://localhost:8000/events/${eventId}/upload`, formData, {
         headers: { "Content-Type": "multipart/form-data" },
       });
       setUploadStatus(`Success! Uploaded ${res.data.photo_ids.length} photos.`);

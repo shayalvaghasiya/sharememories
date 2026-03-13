@@ -37,6 +37,7 @@ services:
       - db
       - redis
     environment:
+      PYTHONUNBUFFERED: 1
       DATABASE_URL: postgresql://admin:password@db:5432/wedding_db
       REDIS_URL: redis://redis:6379/0
 
@@ -51,6 +52,7 @@ services:
       - db
       - redis
     environment:
+      PYTHONUNBUFFERED: 1
       DATABASE_URL: postgresql://admin:password@db:5432/wedding_db
       REDIS_URL: redis://redis:6379/0
 
