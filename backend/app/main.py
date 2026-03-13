@@ -4,6 +4,7 @@ import cv2
 import numpy as np
 from typing import List
 from fastapi import FastAPI, Depends, HTTPException, UploadFile, File
+from fastapi.staticfiles import StaticFiles
 from insightface.app import FaceAnalysis
 from sqlalchemy.orm import Session
 from sqlalchemy import text
@@ -14,6 +15,9 @@ app = FastAPI(title="Wedding AI API")
 # Initialize InsightFace model globally for search
 app_face = FaceAnalysis(name='buffalo_l', providers=['CPUExecutionProvider'])
 app_face.prepare(ctx_id=0, det_size=(640, 640))
+
+# Mount storage to serve images statically for development
+app.mount("/storage", StaticFiles(directory="/storage"), name="storage")
 
 # Create tables and enable vector extension on startup
 @app.on_event("startup")
