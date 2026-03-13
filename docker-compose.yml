@@ -1,0 +1,44 @@
+version: '3.8'
+
+services:
+  # Database Service with pgvector extension pre-installed
+  db:
+    image: pgvector/pgvector:pg16
+    container_name: wedding_db
+    environment:
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: wedding_db
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    restart: always
+
+  # Redis for task queue management
+  redis:
+    image: redis:alpine
+    container_name: wedding_redis
+    ports:
+      - "6379:6379"
+    restart: always
+
+  # The Main API Backend
+  backend:
+    build: ./backend
+    container_name: wedding_api
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    volumes:
+      - ./backend:/app
+      - ./storage:/storage
+    ports:
+      - "8000:8000"
+    depends_on:
+      - db
+      - redis
+    environment:
+      DATABASE_URL: postgresql://admin:password@db:5432/wedding_db
+      REDIS_URL: redis://redis:6379/0
+
+volumes:
+  postgres_data:
