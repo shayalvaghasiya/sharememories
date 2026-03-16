@@ -26,7 +26,7 @@ export default function Home() {
   const [loading, setLoading] = useState(false);
   const [progress, setProgress] = useState(0);
 
-  const apiUrl = "/api";
+  const apiUrl = "http://localhost:8000";
 
   useEffect(() => {
     if (typeof window === "undefined") return;
