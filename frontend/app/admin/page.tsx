@@ -27,7 +27,11 @@ export default function AdminPage() {
   const [isDragging, setIsDragging] = useState(false);
   const [statusMessage, setStatusMessage] = useState("");
 
-  const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
+  // Dynamically get the API URL. 
+  // If running in browser, it points to the same IP serving the frontend, but on port 8000.
+  const apiUrl = typeof window !== "undefined" 
+    ? `${window.location.protocol}//${window.location.hostname}:8000` 
+    : "http://127.0.0.1:8000";
 
   const fetchEvents = useCallback(async () => {
     try {

@@ -64,8 +64,10 @@ services:
       - /app/node_modules
     ports:
       - "3000:3000"
-    env_file:
-      - ./frontend/.env
+    environment:
+      # Use dynamic relative URL so Next.js automatically talks to the backend
+      # running on the same domain/IP that the user's browser is connected to.
+      NEXT_PUBLIC_API_URL: "" 
 
 
 volumes:
