@@ -26,7 +26,7 @@ export default function Home() {
   const [loading, setLoading] = useState(false);
   const [progress, setProgress] = useState(0);
 
-  const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
+  const apiUrl = "/api";
 
   useEffect(() => {
     if (typeof window === "undefined") return;

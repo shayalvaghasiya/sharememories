@@ -27,7 +27,7 @@ export default function AdminPage() {
   const [isDragging, setIsDragging] = useState(false);
   const [statusMessage, setStatusMessage] = useState("");
 
-  const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
+  const apiUrl = "/api";
 
   const fetchEvents = useCallback(async () => {
     try {
