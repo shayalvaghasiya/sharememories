@@ -27,7 +27,7 @@ export default function AdminPage() {
   const [isDragging, setIsDragging] = useState(false);
   const [statusMessage, setStatusMessage] = useState("");
 
-  const apiUrl = "http://localhost:8000";
+  const apiUrl = typeof window !== "undefined" ? "http://localhost:8000" : "http://backend:8000";
 
   const fetchEvents = useCallback(async () => {
     try {
