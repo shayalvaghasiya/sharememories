@@ -62,6 +62,11 @@ def get_drive_token():
     if not creds_json:
         raise ValueError("GOOGLE_CREDENTIALS_JSON environment variable is not set")
     creds_dict = json.loads(creds_json)
+    
+    # Fix escaped newlines in the private key
+    if 'private_key' in creds_dict:
+        creds_dict['private_key'] = creds_dict['private_key'].replace('\\n', '\n')
+        
     creds = service_account.Credentials.from_service_account_info(creds_dict, scopes=['https://www.googleapis.com/auth/drive'])
     req = google.auth.transport.requests.Request()
     creds.refresh(req)
@@ -123,7 +128,7 @@ class ConfirmUploadRequest(BaseModel):
     file_ids: List[str]
 
 @app.post("/events/{event_id}/upload-urls")
-def get_upload_urls(event_id: int, files: List[FileInfo], db: Session = Depends(database.get_db)):
+def get_upload_urls(event_id: int, files: List[FileInfo], request: Request, db: Session = Depends(database.get_db)):
     logger.info(f"Generating upload URLs for event {event_id}, {len(files)} files")
     event = db.query(models.Event).filter(models.Event.event_id == event_id).first()
     if not event:
@@ -132,19 +137,27 @@ def get_upload_urls(event_id: int, files: List[FileInfo], db: Session = Depends(
     token = get_drive_token()
     folder_id = os.getenv("GOOGLE_DRIVE_FOLDER_ID")
     upload_urls = []
+    
+    # Get the origin of the frontend to pass to Google Drive for CORS
+    origin = request.headers.get("origin")
 
     for f in files:
         metadata = {
             "name": f.filename,
             "parents": [folder_id]
         }
+        
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+            "X-Upload-Content-Type": f.contentType
+        }
+        if origin:
+            headers["Origin"] = origin
+            
         res = requests.post(
-            "https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable",
-            headers={
-                "Authorization": f"Bearer {token}",
-                "Content-Type": "application/json",
-                "X-Upload-Content-Type": f.contentType
-            },
+            "https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&supportsAllDrives=true",
+            headers=headers,
             json=metadata
         )
         if res.status_code == 200:

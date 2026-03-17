@@ -102,7 +102,7 @@ export default function AdminPage() {
       for (let i = 0; i < files.length; i++) {
         setStatusMessage(`Uploading ${i + 1} of ${files.length} to Drive...`);
         const res = await axios.put(uploadUrls[i], files[i], {
-          headers: { 'Content-Type': files[i].type },
+          headers: { 'Content-Type': fileInfos[i].contentType },
           onUploadProgress: (progressEvent) => {
             const total = progressEvent.total || progressEvent.loaded;
             const percentCompleted = Math.round(((completed + (progressEvent.loaded / total)) / files.length) * 100);
