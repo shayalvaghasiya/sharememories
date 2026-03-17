@@ -1,11 +1,15 @@
 import os
 import cv2
+import json
+import requests
 import numpy as np
 from celery import Celery
 from insightface.app import FaceAnalysis
 from sqlalchemy.orm import Session
 from .database import SessionLocal
 from . import models
+from google.oauth2 import service_account
+import google.auth.transport.requests
 
 # Initialize Celery
 # Use Redis as both broker and backend, configured via env vars in docker-compose
@@ -16,17 +20,34 @@ celery = Celery(__name__, broker=os.getenv("REDIS_URL"), backend=os.getenv("REDI
 app_face = FaceAnalysis(name='buffalo_l', providers=['CPUExecutionProvider'])
 app_face.prepare(ctx_id=0, det_size=(640, 640))
 
+def get_drive_token():
+    creds_json = os.getenv("GOOGLE_CREDENTIALS_JSON")
+    creds_dict = json.loads(creds_json)
+    creds = service_account.Credentials.from_service_account_info(
+        creds_dict, scopes=['https://www.googleapis.com/auth/drive.readonly']
+    )
+    req = google.auth.transport.requests.Request()
+    creds.refresh(req)
+    return creds.token
+
 @celery.task(name="process_photo_task")
-def process_photo_task(photo_id: int, file_path: str):
+def process_photo_task(photo_id: int, file_id: str):
     """
     Background task to process uploaded photos.
     Detects faces and saves embeddings to the database.
     """
     db: Session = SessionLocal()
     try:
-        img = cv2.imread(file_path)
+        token = get_drive_token()
+        res = requests.get(f'https://www.googleapis.com/drive/v3/files/{file_id}?alt=media', headers={'Authorization': f'Bearer {token}'})
+        
+        if res.status_code != 200:
+            return f"Error downloading from Drive: {res.text}"
+
+        nparr = np.frombuffer(res.content, np.uint8)
+        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
         if img is None:
-            return f"Error: Could not read image {file_path}"
+            return f"Error: Could not decode image {file_id}"
 
         # Downscale massive images before passing to InsightFace to save RAM
         max_dimension = 1200
@@ -34,17 +55,6 @@ def process_photo_task(photo_id: int, file_path: str):
         if max(h, w) > max_dimension:
             scale = max_dimension / max(h, w)
             img = cv2.resize(img, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
-            
-        # Generate thumbnail for faster frontend preview
-        directory, filename = os.path.split(file_path)
-        thumb_path = os.path.join(directory, f"thumb_{filename}")
-        if not os.path.exists(thumb_path):
-            thumb_scale = 400 / max(h, w)
-            if thumb_scale < 1:
-                thumb_img = cv2.resize(img, (int(w * thumb_scale), int(h * thumb_scale)), interpolation=cv2.INTER_AREA)
-                cv2.imwrite(thumb_path, thumb_img)
-            else:
-                cv2.imwrite(thumb_path, img)
 
         # Detect faces
         faces = app_face.get(img)

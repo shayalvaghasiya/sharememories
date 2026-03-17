@@ -11,3 +11,5 @@ opencv-python-headless
 insightface
 onnxruntime
 numpy
+requests
+google-auth

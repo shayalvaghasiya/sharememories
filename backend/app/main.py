@@ -1,6 +1,7 @@
 import os
-import shutil
 import time
+import json
+import requests
 import uuid
 import logging
 import cv2
@@ -9,10 +10,12 @@ from typing import List
 from celery import Celery
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Request, Form
-from fastapi.staticfiles import StaticFiles
 from insightface.app import FaceAnalysis
 from sqlalchemy.orm import Session
 from sqlalchemy import text
+from pydantic import BaseModel
+from google.oauth2 import service_account
+import google.auth.transport.requests
 from . import models, schemas, database
 
 # Configure Logging
@@ -54,18 +57,15 @@ def get_face_app():
         logger.info("InsightFace model loaded successfully.")
     return app_face
 
-# Mount storage to serve images statically for development
-# Use an overridable storage path so tests and non-container environments work
-storage_path = os.getenv("STORAGE_PATH", "/storage")
-if not os.path.exists(storage_path):
-    try:
-        os.makedirs(storage_path, exist_ok=True)
-    except PermissionError:
-        # Fall back to workspace-local storage if /storage isn't writable (e.g. unit tests)
-        storage_path = os.path.join(os.getcwd(), "storage")
-        os.makedirs(storage_path, exist_ok=True)
-
-app.mount("/storage", StaticFiles(directory=storage_path), name="storage")
+def get_drive_token():
+    creds_json = os.getenv("GOOGLE_CREDENTIALS_JSON")
+    if not creds_json:
+        raise ValueError("GOOGLE_CREDENTIALS_JSON environment variable is not set")
+    creds_dict = json.loads(creds_json)
+    creds = service_account.Credentials.from_service_account_info(creds_dict, scopes=['https://www.googleapis.com/auth/drive'])
+    req = google.auth.transport.requests.Request()
+    creds.refresh(req)
+    return creds.token
 
 # Create tables and enable vector extension on startup
 @app.on_event("startup")
@@ -186,10 +186,10 @@ def delete_photo(photo_id: int, db: Session = Depends(database.get_db)):
         raise HTTPException(status_code=404, detail="Photo not found")
     
     try:
-        if os.path.exists(photo.file_path):
-            os.remove(photo.file_path)
+        token = get_drive_token()
+        requests.delete(f'https://www.googleapis.com/drive/v3/files/{photo.file_path}', headers={'Authorization': f'Bearer {token}'})
     except Exception as e:
-        logger.error(f"Error deleting file {photo.file_path}: {e}")
+        logger.error(f"Error deleting file from drive {photo.file_path}: {e}")
         
     db.delete(photo)
     db.commit()
@@ -256,8 +256,4 @@ def reset_system(db: Session = Depends(database.get_db)):
     db.execute(text("TRUNCATE TABLE events RESTART IDENTITY CASCADE"))
     db.commit()
 
-    # 2. Clear Storage
-    if os.path.exists("/storage/events"):
-        shutil.rmtree("/storage/events")
-        
-    return {"message": "System reset successfully. All events, photos, and faces have been deleted."}
+    return {"message": "Database reset successfully."}

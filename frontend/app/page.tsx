@@ -103,9 +103,9 @@ export default function Home() {
     }
   };
 
-  // Helper to resolve backend image paths to local URL
-  // API returns /storage/events/..., mapped to http://localhost:8000/storage/...
-  const getImageUrl = (path: string) => `${apiUrl}${path}`;
+  // Helper to resolve backend drive ID to Google Drive URL
+  const getDriveThumbUrl = (id: string) => `https://drive.google.com/thumbnail?id=${id}&sz=w600`;
+  const getDriveFullUrl = (id: string) => `https://drive.google.com/uc?id=${id}`;
 
   return (
     <main className="min-h-screen bg-slate-50 text-slate-800 font-sans">
@@ -283,7 +283,7 @@ export default function Home() {
                     />
                     <div className="absolute inset-0 bg-black/0 group-hover:bg-black/10 transition-colors pointer-events-none" />
                     <a 
-                      href={getImageUrl(path)} 
+                      href={`${getDriveFullUrl(path)}&export=download`}
                       target="_blank" 
                       download
                       className="absolute bottom-3 right-3 bg-white/90 p-2 rounded-full opacity-0 group-hover:opacity-100 transition-opacity text-slate-800 hover:text-indigo-600 shadow-sm"
