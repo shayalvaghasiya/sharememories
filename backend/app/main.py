@@ -30,7 +30,7 @@ app = FastAPI(title="Wedding AI API")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["https://scored-periodically-painting-bet.trycloudflare.com", "http://localhost:3000"], 
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -132,6 +132,7 @@ def upload_photos(
     os.makedirs(storage_path, exist_ok=True)
     
     saved_photos = []
+    new_photos = []
     
     try:
         for file in files:
@@ -154,19 +155,23 @@ def upload_photos(
                 
             # Save to DB
             new_photo = models.Photo(event_id=event_id, file_path=file_location)
-            db.add(new_photo)
-            db.commit()
-            db.refresh(new_photo)
+            new_photos.append(new_photo)
             
+        # Bulk save to DB to significantly speed up waiting time after upload
+        db.add_all(new_photos)
+        db.commit()
+        
+        for new_photo in new_photos:
+            db.refresh(new_photo)
             # Queue for AI Processing (Phase 4)
             celery_client.send_task("process_photo_task", args=[new_photo.photo_id, file_location])
-            
             saved_photos.append(new_photo.photo_id)
             
         logger.info(f"Successfully uploaded {len(saved_photos)} photos.")
         return {"message": "Upload successful", "photo_ids": saved_photos}
     except Exception as e:
         logger.error(f"Upload failed: {e}")
+        db.rollback()
         raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
 
 @app.get("/events/{event_id}/photos", response_model=List[schemas.Photo])

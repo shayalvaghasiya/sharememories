@@ -34,6 +34,17 @@ def process_photo_task(photo_id: int, file_path: str):
         if max(h, w) > max_dimension:
             scale = max_dimension / max(h, w)
             img = cv2.resize(img, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
+            
+        # Generate thumbnail for faster frontend preview
+        directory, filename = os.path.split(file_path)
+        thumb_path = os.path.join(directory, f"thumb_{filename}")
+        if not os.path.exists(thumb_path):
+            thumb_scale = 400 / max(h, w)
+            if thumb_scale < 1:
+                thumb_img = cv2.resize(img, (int(w * thumb_scale), int(h * thumb_scale)), interpolation=cv2.INTER_AREA)
+                cv2.imwrite(thumb_path, thumb_img)
+            else:
+                cv2.imwrite(thumb_path, img)
 
         # Detect faces
         faces = app_face.get(img)

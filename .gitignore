@@ -24,6 +24,9 @@ __pycache__/
 # production
 /build
 
+# user-generated content
+/storage/
+
 # misc
 .DS_Store
 *.pem
