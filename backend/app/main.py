@@ -115,6 +115,59 @@ def get_event(event_id: int, db: Session = Depends(database.get_db)):
         raise HTTPException(status_code=404, detail="Event not found")
     return event
 
+class FileInfo(BaseModel):
+    filename: str
+    contentType: str
+
+class ConfirmUploadRequest(BaseModel):
+    file_ids: List[str]
+
+@app.post("/events/{event_id}/upload-urls")
+def get_upload_urls(event_id: int, files: List[FileInfo], db: Session = Depends(database.get_db)):
+    logger.info(f"Generating upload URLs for event {event_id}, {len(files)} files")
+    event = db.query(models.Event).filter(models.Event.event_id == event_id).first()
+    if not event:
+        raise HTTPException(status_code=404, detail="Event not found")
+
+    token = get_drive_token()
+    folder_id = os.getenv("GOOGLE_DRIVE_FOLDER_ID")
+    upload_urls = []
+
+    for f in files:
+        metadata = {
+            "name": f.filename,
+            "parents": [folder_id]
+        }
+        res = requests.post(
+            "https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+                "X-Upload-Content-Type": f.contentType
+            },
+            json=metadata
+        )
+        if res.status_code == 200:
+            upload_urls.append(res.headers.get('Location'))
+        else:
+            logger.error(f"Failed to create upload session: {res.text}")
+            raise HTTPException(status_code=500, detail="Failed to initiate upload")
+
+    return {"uploadUrls": upload_urls}
+
+@app.post("/events/{event_id}/confirm-upload")
+def confirm_upload(event_id: int, payload: ConfirmUploadRequest, db: Session = Depends(database.get_db)):
+    logger.info(f"Confirming upload for event {event_id}, {len(payload.file_ids)} files")
+    new_photos = [models.Photo(event_id=event_id, file_path=file_id) for file_id in payload.file_ids]
+    
+    db.add_all(new_photos)
+    db.commit()
+    
+    for new_photo in new_photos:
+        db.refresh(new_photo)
+        celery_client.send_task("process_photo_task", args=[new_photo.photo_id, new_photo.file_path])
+    return {"message": "Upload confirmed"}
+
 @app.post("/events/{event_id}/upload")
 def upload_photos(
     event_id: int, 

@@ -276,7 +276,10 @@ export default function Home() {
                 {results.map((path, idx) => (
                   <div key={idx} className="break-inside-avoid relative group overflow-hidden rounded-xl shadow-md hover:shadow-xl transition-all duration-300">
                     <img
-                      src={getImageUrl(path)}
+                      src={getDriveThumbUrl(path)}
+                      onError={(e) => {
+                        e.currentTarget.src = getDriveFullUrl(path);
+                      }}
                       alt={`Match ${idx}`}
                       className="w-full h-auto object-cover transform transition duration-700 group-hover:scale-105"
                       loading="lazy"
