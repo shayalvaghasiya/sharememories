@@ -20,6 +20,8 @@ export default function Home() {
   
   // Results State
   const [results, setResults] = useState<any[]>([]);
+  const [selectedPhotos, setSelectedPhotos] = useState<string[]>([]);
+  const [isSelectAll, setIsSelectAll] = useState(false);
   const [loading, setLoading] = useState(false);
   const [progress, setProgress] = useState(0);
   const [searchError, setSearchError] = useState<string | null>(null);
@@ -35,6 +37,11 @@ export default function Home() {
       validateAndEnter(code);
     }
   }, []);
+
+  useEffect(() => {
+    setSelectedPhotos([]);
+    setIsSelectAll(false);
+  }, [results]);
 
   // --- Login Handlers ---
   
@@ -66,6 +73,47 @@ export default function Home() {
       setCheckingEvent(false);
     }
   };
+
+  const handleSelectPhoto = (photoUrl: string) => {
+    setSelectedPhotos(prev => 
+      prev.includes(photoUrl) ? prev.filter(p => p !== photoUrl) : [...prev, photoUrl]
+    );
+  };
+
+  const handleSelectAll = () => {
+    if (isSelectAll) {
+      setSelectedPhotos([]);
+    } else {
+      setSelectedPhotos(results.map(p => `${apiUrl}${p.download_url}`));
+    }
+    setIsSelectAll(!isSelectAll);
+  };
+
+  const handleDownloadSelected = async () => {
+    if (selectedPhotos.length === 0) return;
+
+    alert("Downloading selected photos. This may take a moment.");
+
+    // try {
+    //   const zip = new JSZip();
+    //   const promises = selectedPhotos.map(async (url) => {
+    //     const response = await axios.get(url, { responseType: 'blob' });
+    //     const filename = url.split('/').pop() || 'photo.jpg';
+    //     zip.file(filename, response.data);
+    //   });
+
+    //   await Promise.all(promises);
+
+    //   zip.generateAsync({ type: 'blob' }).then(content => {
+    //     saveAs(content, `ShareMemories_${new Date().toISOString().slice(0,10)}.zip`);
+    //   });
+
+    // } catch (error) {
+    //   console.error("Failed to download photos", error);
+    //   alert("Failed to download photos. Please try again.");
+    // }
+  };
+
 
   // --- Camera/File Handlers ---
 
@@ -252,6 +300,35 @@ export default function Home() {
                 Try another selfie
               </button>
             </div>
+
+            {results.length > 0 && (
+            <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-4 mb-6">
+              <div className="flex justify-between items-center">
+                <div className="flex items-center gap-4">
+                    <div className="flex items-center">
+                      <input
+                        type="checkbox"
+                        id="selectAll"
+                        checked={isSelectAll}
+                        onChange={handleSelectAll}
+                        className="h-4 w-4 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
+                      />
+                      <label htmlFor="selectAll" className="ml-2 block text-sm text-gray-900">
+                        Select All
+                      </label>
+                    </div>
+                    <p className="text-sm text-slate-500">{selectedPhotos.length} photos selected</p>
+                </div>
+                <button
+                  onClick={handleDownloadSelected}
+                  disabled={selectedPhotos.length === 0}
+                  className="bg-indigo-600 text-white px-4 py-2 rounded-lg font-semibold hover:bg-indigo-700 disabled:bg-slate-300 transition-colors"
+                >
+                  Download Selected
+                </button>
+              </div>
+            </div>
+            )}
             
             {results.length === 0 ? (
               <div className="text-center py-20 bg-slate-50 rounded-2xl border border-dashed border-slate-200">
@@ -278,6 +355,14 @@ export default function Home() {
                     >
                       <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path></svg>
                     </a>
+                    <div className="absolute top-3 left-3">
+                      <input
+                        type="checkbox"
+                        checked={selectedPhotos.includes(`${apiUrl}${photo.download_url}`)}
+                        onChange={() => handleSelectPhoto(`${apiUrl}${photo.download_url}`)}
+                        className="h-5 w-5 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
+                      />
+                    </div>
                   </div>
                 ))}
               </div>

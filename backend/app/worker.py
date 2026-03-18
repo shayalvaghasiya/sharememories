@@ -36,39 +36,49 @@ def get_drive_token():
     return creds.token
 
 @celery.task(name="process_photo_task")
-def process_photo_task(photo_id: int, file_id: str):
+def process_photo_task(photo_id: int, file_path: str):
     """
     Background task to process uploaded photos.
     Detects faces and saves embeddings to the database.
     """
     db: Session = SessionLocal()
     try:
-        token = get_drive_token()
-        res = requests.get(f'https://www.googleapis.com/drive/v3/files/{file_id}?alt=media', headers={'Authorization': f'Bearer {token}'})
-        
-        if res.status_code != 200:
-            # Mark as failed if download fails
-            photo = db.query(models.Photo).filter(models.Photo.photo_id == photo_id).first()
-            if photo:
-                photo.processing_status = "failed"
-                db.commit()
-            return f"Error downloading from Drive: {res.text}"
+        photo = db.query(models.Photo).filter(models.Photo.photo_id == photo_id).first()
+        if not photo:
+            return f"Error: Photo {photo_id} not found in DB"
+            
+        img = None
+        # Optimization: Prioritize local thumbnail if it exists to save RAM and avoid Drive download
+        if photo.thumbnail_path and os.path.exists(photo.thumbnail_path):
+            img = cv2.imread(photo.thumbnail_path)
+            if img is not None:
+                # Thumbnail is already resized (max 600px in process_drive_sync), so we can just use it
+                pass
 
-        nparr = np.frombuffer(res.content, np.uint8)
-        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
         if img is None:
-            photo = db.query(models.Photo).filter(models.Photo.photo_id == photo_id).first()
-            if photo:
-                photo.processing_status = "failed"
-                db.commit()
-            return f"Error: Could not decode image {file_id}"
+            if photo.drive_file_id:
+                # Fetch original high-res image directly from Drive into memory (if thumbnail missing)
+                token = get_drive_token()
+                res = requests.get(f'https://www.googleapis.com/drive/v3/files/{photo.drive_file_id}?alt=media', headers={'Authorization': f'Bearer {token}'})
+                if res.status_code == 200:
+                    nparr = np.frombuffer(res.content, np.uint8)
+                    img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+            else:
+                # Fallback to local file for manual uploads
+                if os.path.exists(file_path):
+                    img = cv2.imread(file_path)
+                    
+        if img is None:
+            photo.processing_status = "failed"
+            db.commit()
+            return f"Error: Could not decode image for photo {photo_id}"
 
-        # Downscale massive images before passing to InsightFace to save RAM
-        max_dimension = 1200
+        # Optimization: Resize image if it's still too large (e.g. if it came from Drive or manual upload)
+        max_dim = 800
         h, w = img.shape[:2]
-        if max(h, w) > max_dimension:
-            scale = max_dimension / max(h, w)
-            img = cv2.resize(img, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
+        if max(h, w) > max_dim:
+            scale = max_dim / max(h, w)
+            img = cv2.resize(img, (int(w * scale), int(h * scale)))
 
         # Detect faces
         faces = app_face.get(img)

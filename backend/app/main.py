@@ -1,4 +1,5 @@
 import os
+import shutil
 import io
 import time
 import json
@@ -29,6 +30,17 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+class NumpyEncoder(json.JSONEncoder):
+    """Custom encoder for numpy data types"""
+    def default(self, obj):
+        if isinstance(obj, (np.float32, np.float64)):
+            return float(obj)
+        if isinstance(obj, (np.int32, np.int64)):
+            return int(obj)
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        return super(NumpyEncoder, self).default(obj)
+
 # Initialize Celery Client (for sending tasks only, no model loading)
 celery_client = Celery(__name__, broker=os.getenv("REDIS_URL"), backend=os.getenv("REDIS_URL"))
 
@@ -42,7 +54,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-os.makedirs("/storage", exist_ok=True)
+try:
+    if not os.path.exists("/storage"):
+        os.makedirs("/storage", exist_ok=True)
+    elif not os.path.isdir("/storage"):
+        logger.warning("/storage exists but is not a directory. This may cause issues.")
+except Exception as e:
+    logger.error(f"Error checking/creating /storage: {e}")
+
 app.mount("/static", StaticFiles(directory="/storage"), name="static")
 
 @app.middleware("http")
@@ -81,23 +100,37 @@ def get_drive_token():
 # Create tables and enable vector extension on startup
 @app.on_event("startup")
 def startup_event():
-    # Enable pgvector extension and migrate schema seamlessly
-    with database.engine.connect() as conn:
-        conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
-        
-        # Try-except block to ignore errors if the table doesn't exist yet
+    # Retry logic to wait for database to be ready
+    max_retries = 5
+    for i in range(max_retries):
         try:
-            conn.execute(text("ALTER TABLE photos ADD COLUMN IF NOT EXISTS drive_file_id VARCHAR"))
-            conn.execute(text("ALTER TABLE photos ADD COLUMN IF NOT EXISTS thumbnail_path VARCHAR"))
-            conn.execute(text("ALTER TABLE photos ADD COLUMN IF NOT EXISTS processing_status VARCHAR DEFAULT 'pending'"))
-            conn.execute(text("ALTER TABLE photos ADD COLUMN IF NOT EXISTS faces_count INTEGER DEFAULT 0"))
-        except Exception as e:
-            logger.info(f"Schema alter skipped (table might not exist yet): {e}")
+            logger.info(f"Database connection attempt {i+1}/{max_retries}...")
             
-        conn.commit()
-    
-    # Create tables
-    models.Base.metadata.create_all(bind=database.engine)
+            # 1. Enable pgvector extension first (required for models with Vector columns)
+            with database.engine.begin() as conn:
+                conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
+            
+            # 2. Create tables
+            models.Base.metadata.create_all(bind=database.engine)
+            
+            # 3. Migrate schema (add missing columns to existing tables)
+            with database.engine.begin() as conn:
+                try:
+                    conn.execute(text("ALTER TABLE photos ADD COLUMN IF NOT EXISTS drive_file_id VARCHAR"))
+                    conn.execute(text("ALTER TABLE photos ADD COLUMN IF NOT EXISTS thumbnail_path VARCHAR"))
+                    conn.execute(text("ALTER TABLE photos ADD COLUMN IF NOT EXISTS processing_status VARCHAR DEFAULT 'pending'"))
+                    conn.execute(text("ALTER TABLE photos ADD COLUMN IF NOT EXISTS faces_count INTEGER DEFAULT 0"))
+                except Exception as e:
+                    logger.info(f"Schema migration skipped or failed: {e}")
+            
+            logger.info("Database initialized successfully.")
+            break
+        except Exception as e:
+            if i == max_retries - 1:
+                logger.error(f"Failed to connect to database after {max_retries} attempts: {e}")
+                raise e
+            logger.warning(f"Database not ready, retrying in 2 seconds... ({e})")
+            time.sleep(2)
 
 @app.get("/")
 def read_root():
@@ -155,46 +188,56 @@ def process_drive_sync(event_id: int, files: list):
         storage_path = f"/storage/events/{event_id}/thumbnails"
         os.makedirs(storage_path, exist_ok=True)
         
-        for f in files:
-            file_id = f['id']
-            # Download image into memory
-            dl_url = f"https://www.googleapis.com/drive/v3/files/{file_id}?alt=media"
-            dl_res = requests.get(dl_url, headers=headers)
-            if dl_res.status_code != 200:
-                logger.error(f"Failed to download {file_id}")
-                continue
-                
-            try:
-                nparr = np.frombuffer(dl_res.content, np.uint8)
-                img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-                if img is None:
+        batch_size = 10
+        for i in range(0, len(files), batch_size):
+            batch_files = files[i:i + batch_size]
+            new_photos = []
+            
+            for f in batch_files:
+                file_id = f['id']
+                try:
+                    # Download image into memory
+                    dl_url = f"https://www.googleapis.com/drive/v3/files/{file_id}?alt=media"
+                    dl_res = requests.get(dl_url, headers=headers)
+                    if dl_res.status_code != 200:
+                        continue
+                        
+                    nparr = np.frombuffer(dl_res.content, np.uint8)
+                    img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                    if img is None:
+                        continue
+                        
+                    # Resize for thumbnail
+                    height, width = img.shape[:2]
+                    max_dim = 600
+                    if max(height, width) > max_dim:
+                        scale = max_dim / max(height, width)
+                        img = cv2.resize(img, (int(width * scale), int(height * scale)))
+                        
+                    thumb_filename = f"{file_id}.jpg"
+                    thumb_path = f"{storage_path}/{thumb_filename}"
+                    cv2.imwrite(thumb_path, img)
+                    
+                    photo = models.Photo(
+                        event_id=event_id, 
+                        file_path=f"events/{event_id}/thumbnails/{thumb_filename}",
+                        drive_file_id=file_id,
+                        thumbnail_path=thumb_path
+                    )
+                    db.add(photo)
+                    new_photos.append((photo, thumb_path))
+                except Exception as e:
+                    logger.error(f"Error processing {file_id}: {e}")
                     continue
-                    
-                height, width = img.shape[:2]
-                max_dim = 600
-                if max(height, width) > max_dim:
-                    scale = max_dim / max(height, width)
-                    img = cv2.resize(img, (int(width * scale), int(height * scale)))
-                    
-                thumb_filename = f"{file_id}.jpg"
-                thumb_path = f"{storage_path}/{thumb_filename}"
-                cv2.imwrite(thumb_path, img)
+            
+            # Commit the batch to get IDs
+            db.commit()
+            
+            # Queue Celery tasks for all photos in the batch
+            for photo, thumb_path in new_photos:
+                db.refresh(photo)
+                celery_client.send_task("process_photo_task", args=[photo.photo_id, thumb_path])
                 
-                new_photo = models.Photo(
-                    event_id=event_id, 
-                    file_path=f"events/{event_id}/thumbnails/{thumb_filename}",
-                    drive_file_id=file_id,
-                    thumbnail_path=thumb_path
-                )
-                db.add(new_photo)
-                db.commit()
-                db.refresh(new_photo)
-                
-                celery_client.send_task("process_photo_task", args=[new_photo.photo_id, thumb_path])
-                
-            except Exception as e:
-                logger.error(f"Error processing {file_id}: {e}")
-                continue
     except Exception as e:
         logger.error(f"Fatal error in background sync: {e}")
     finally:
@@ -269,130 +312,6 @@ def download_photo(photo_id: int, db: Session = Depends(database.get_db)):
         headers={"Content-Disposition": f"attachment; filename=photo_{photo_id}.jpg"}
     )
 
-@app.post("/events/{event_id}/upload-urls")
-def get_upload_urls(event_id: int, files: List[FileInfo], request: Request, db: Session = Depends(database.get_db)):
-    logger.info(f"Generating upload URLs for event {event_id}, {len(files)} files")
-    event = db.query(models.Event).filter(models.Event.event_id == event_id).first()
-    if not event:
-        raise HTTPException(status_code=404, detail="Event not found")
-
-    token = get_drive_token()
-    folder_id = os.getenv("GOOGLE_DRIVE_FOLDER_ID")
-    upload_urls = []
-    
-    # Get the origin of the frontend to pass to Google Drive for CORS
-    origin = request.headers.get("origin")
-
-    for f in files:
-        metadata = {
-            "name": f.filename,
-            "parents": [folder_id]
-        }
-        
-        headers = {
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
-            "X-Upload-Content-Type": f.contentType
-        }
-        if origin:
-            headers["Origin"] = origin
-            
-        res = requests.post(
-            "https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&supportsAllDrives=true",
-            headers=headers,
-            json=metadata
-        )
-        if res.status_code == 200:
-            upload_urls.append(res.headers.get('Location'))
-        else:
-            logger.error(f"Failed to create upload session: {res.text}")
-            raise HTTPException(status_code=500, detail="Failed to initiate upload")
-
-    return {"uploadUrls": upload_urls}
-
-@app.post("/events/{event_id}/confirm-upload")
-def confirm_upload(event_id: int, payload: ConfirmUploadRequest, db: Session = Depends(database.get_db)):
-    logger.info(f"Confirming upload for event {event_id}, {len(payload.file_ids)} files")
-    new_photos = [models.Photo(event_id=event_id, file_path=file_id) for file_id in payload.file_ids]
-    
-    db.add_all(new_photos)
-    db.commit()
-    
-    for new_photo in new_photos:
-        db.refresh(new_photo)
-        celery_client.send_task("process_photo_task", args=[new_photo.photo_id, new_photo.file_path])
-    return {"message": "Upload confirmed"}
-
-@app.post("/events/{event_id}/upload-cloud")
-def upload_photos_cloud(
-    event_id: int, 
-    files: List[UploadFile] = File(...), 
-    db: Session = Depends(database.get_db)
-):
-    logger.info(f"Received cloud upload request for event {event_id} with {len(files)} files.")
-    event = db.query(models.Event).filter(models.Event.event_id == event_id).first()
-    if not event:
-        raise HTTPException(status_code=404, detail="Event not found")
-
-    token = get_drive_token()
-    folder_id = os.getenv("GOOGLE_DRIVE_FOLDER_ID")
-    saved_photos = []
-
-    try:
-        for file in files:
-            content_type = file.content_type or "application/octet-stream"
-            # 1. Start Resumable Upload Session
-            metadata = {
-                "name": file.filename,
-                "parents": [folder_id]
-            }
-            headers = {
-                "Authorization": f"Bearer {token}",
-                "Content-Type": "application/json",
-                "X-Upload-Content-Type": content_type
-            }
-            res = requests.post(
-                "https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&supportsAllDrives=true",
-                headers=headers,
-                json=metadata
-            )
-            if res.status_code != 200:
-                logger.error(f"Failed to create upload session: {res.text}")
-                continue
-
-            upload_url = res.headers.get('Location')
-            
-            # 2. Upload the bytes
-            file.file.seek(0)
-            file_bytes = file.file.read()
-            put_res = requests.put(upload_url, data=file_bytes, headers={"Content-Type": content_type})
-            
-            if put_res.status_code in (200, 201, 308):
-                file_id = put_res.json().get('id') if put_res.status_code in (200, 201) else None
-                if not file_id:
-                    # In some cases 200/201 might not return JSON or might not be final
-                    # If this happens and we don't have file_id, handle accordingly
-                    pass
-                if file_id:
-                    # 3. Save to DB
-                    new_photo = models.Photo(event_id=event_id, file_path=file_id)
-                    db.add(new_photo)
-                    db.commit()
-                    db.refresh(new_photo)
-                    celery_client.send_task("process_photo_task", args=[new_photo.photo_id, new_photo.file_path])
-                    saved_photos.append(new_photo.photo_id)
-            else:
-                logger.error(f"Failed to upload file bytes: {put_res.text}")
-
-        if not saved_photos:
-            raise HTTPException(status_code=500, detail="Failed to successfully upload photos to Google Drive.")
-
-        return {"message": "Upload successful", "photo_ids": saved_photos}
-    except Exception as e:
-        logger.error(f"Cloud upload failed: {e}")
-        db.rollback()
-        raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
-
 @app.post("/events/{event_id}/upload")
 def upload_photos(
     event_id: int, 
@@ -460,14 +379,22 @@ def get_event_photos(event_id: int, db: Session = Depends(database.get_db)):
 @app.delete("/photos/{photo_id}")
 def delete_photo(photo_id: int, db: Session = Depends(database.get_db)):
     photo = db.query(models.Photo).filter(models.Photo.photo_id == photo_id).first()
-    if not photo:
-        raise HTTPException(status_code=404, detail="Photo not found")
-    
     try:
-        token = get_drive_token()
-        requests.delete(f'https://www.googleapis.com/drive/v3/files/{photo.file_path}', headers={'Authorization': f'Bearer {token}'})
+        # Delete from local storage if exists
+        if photo.file_path and os.path.exists(photo.file_path):
+            os.remove(photo.file_path)
+            logger.info(f"Deleted local file: {photo.file_path}")
+            
+        if photo.thumbnail_path and os.path.exists(photo.thumbnail_path):
+            os.remove(photo.thumbnail_path)
+            logger.info(f"Deleted local thumbnail: {photo.thumbnail_path}")
+
+        # Delete from Google Drive if it was a drive file
+        if photo.drive_file_id:
+            token = get_drive_token()
+            requests.delete(f'https://www.googleapis.com/drive/v3/files/{photo.drive_file_id}', headers={'Authorization': f'Bearer {token}'})
     except Exception as e:
-        logger.error(f"Error deleting file from drive {photo.file_path}: {e}")
+        logger.error(f"Error deleting files for photo {photo_id}: {e}")
         
     db.delete(photo)
     db.commit()
@@ -492,6 +419,14 @@ def search_faces(
     if img is None:
         logger.error("Error: Could not decode image file")
         raise HTTPException(status_code=400, detail="Invalid image file")
+
+    # Optimization: Resize image if it's too large to save RAM during inference
+    max_dim = 800
+    h, w = img.shape[:2]
+    if max(h, w) > max_dim:
+        scale = max_dim / max(h, w)
+        img = cv2.resize(img, (int(w * scale), int(h * scale)))
+        logger.info(f"Resized search image to {img.shape[1]}x{img.shape[0]}")
 
     logger.info("Starting face detection (Inference)...")
     # Detect face
@@ -611,7 +546,7 @@ def export_database(db: Session = Depends(database.get_db)):
         {
             "face_id": f.face_id,
             "photo_id": f.photo_id,
-            "embedding": list(f.embedding) if f.embedding is not None else [],
+            "embedding": f.embedding.tolist() if f.embedding is not None else [],
         }
         for f in faces
     ]
@@ -623,7 +558,7 @@ def export_database(db: Session = Depends(database.get_db)):
         "faces": faces_data,
     }
 
-    json_bytes = json.dumps(snapshot, indent=2).encode("utf-8")
+    json_bytes = json.dumps(snapshot, indent=2, cls=NumpyEncoder).encode("utf-8")
     return StreamingResponse(
         io.BytesIO(json_bytes),
         media_type="application/json",
@@ -720,12 +655,31 @@ async def import_database(file: UploadFile = File(...), db: Session = Depends(da
 
 
 @app.delete("/reset")
-def reset_system(db: Session = Depends(database.get_db)):
+def reset_system(background_tasks: BackgroundTasks, db: Session = Depends(database.get_db)):
     logger.warning("Resetting system: Clearing database and storage.")
     
     # 1. Clear Database
-    # TRUNCATE events CASCADE will also truncate photos and faces due to foreign keys
-    db.execute(text("TRUNCATE TABLE events RESTART IDENTITY CASCADE"))
-    db.commit()
+    try:
+        # TRUNCATE events CASCADE will also truncate photos and faces due to foreign keys
+        db.execute(text("TRUNCATE TABLE events RESTART IDENTITY CASCADE"))
+        db.commit()
+    except Exception as e:
+        logger.error(f"Error resetting database (tables might not exist): {e}")
+        db.rollback()
 
-    return {"message": "Database reset successfully."}
+    # 2. Clear Storage in background
+    # Doing this in a background task prevents the "Connection reset by peer" error 
+    # if Uvicorn is running with --reload and watching the /storage directory.
+    def clear_storage():
+        storage_path = "/storage/events"
+        if os.path.exists(storage_path):
+            try:
+                shutil.rmtree(storage_path)
+                os.makedirs(storage_path, exist_ok=True)
+                logger.info("Storage cleared and recreated successfully.")
+            except Exception as e:
+                logger.error(f"Error clearing storage: {e}")
+            
+    background_tasks.add_task(clear_storage)
+
+    return {"message": "System reset initiated successfully."}

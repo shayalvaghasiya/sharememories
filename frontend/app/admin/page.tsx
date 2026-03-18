@@ -102,11 +102,11 @@ export default function AdminPage() {
     fetchEvents();
   }, [fetchEvents]);
 
-  // Auto-refresh DB status every 5 seconds when authenticated and on main view
+  // Auto-refresh DB status every 10 seconds when authenticated and on main view
   useEffect(() => {
     if (isAuthenticated && !selectedEvent) {
       fetchDbStatus();
-      const interval = setInterval(fetchDbStatus, 5000);
+      const interval = setInterval(fetchDbStatus, 10000);
       return () => clearInterval(interval);
     }
   }, [isAuthenticated, selectedEvent, fetchDbStatus]);
@@ -131,15 +131,15 @@ export default function AdminPage() {
 
     setSyncing(true);
     setStatusMessage("Starting sync initialization...");
-    setSyncProgress({ active: true, current: 0, total: 100 }); 
+    setSyncProgress({ active: true, current: 0, total: 100 });
 
     try {
       const response = await axios.post(`${apiUrl}/events/${getEventId(selectedEvent)}/sync-drive`, {
         folder_url: folderUrl
       });
-      
+
       const { new_found, total_found } = response.data;
-      
+
       if (new_found === 0) {
         setStatusMessage(`All ${total_found} images in the folder are already synced.`);
         setSyncProgress({ active: false, current: 0, total: 0 });
@@ -147,50 +147,50 @@ export default function AdminPage() {
         setFolderUrl("");
         return;
       }
-      
+
       setStatusMessage(`Syncing ${new_found} new photos...`);
       setSyncProgress({ active: true, current: 0, total: new_found });
-      
+
       let currentPhotosCount = eventPhotos.length;
       let targetCount = currentPhotosCount + new_found;
       let consecutiveNoProgress = 0;
       let lastCount = currentPhotosCount;
-      
+
       const interval = setInterval(async () => {
         try {
           const photosRes = await axios.get(`${apiUrl}/events/${getEventId(selectedEvent)}/photos`);
           const newPhotos = photosRes.data;
-          
+
           setEventPhotos(newPhotos);
-          
+
           let syncedNow = newPhotos.length - currentPhotosCount;
-          if (syncedNow < 0) syncedNow = 0; 
-          
+          if (syncedNow < 0) syncedNow = 0;
+
           setSyncProgress(prev => ({ ...prev, current: syncedNow }));
-          
+
           if (newPhotos.length === lastCount) {
             consecutiveNoProgress++;
           } else {
             consecutiveNoProgress = 0;
             lastCount = newPhotos.length;
           }
-          
+
           if (newPhotos.length >= targetCount || consecutiveNoProgress > 20) {
             clearInterval(interval);
             setSyncProgress({ active: false, current: 0, total: 0 });
             setSyncing(false);
             setFolderUrl("");
             if (newPhotos.length >= targetCount) {
-                setStatusMessage(`Sync complete! Successfully imported ${new_found} new photos.`);
+              setStatusMessage(`Sync complete! Successfully imported ${new_found} new photos.`);
             } else {
-                setStatusMessage(`Sync paused or encountered errors. Imported ${syncedNow} photos.`);
+              setStatusMessage(`Sync paused or encountered errors. Imported ${syncedNow} photos.`);
             }
           }
         } catch (e) {
           console.error("Polling error", e);
         }
       }, 2000);
-      
+
     } catch (error) {
       console.error("Sync failed", error);
       setStatusMessage("Error: Failed to initiate Google Drive sync.");
@@ -216,6 +216,8 @@ export default function AdminPage() {
         setStatusMessage("Resetting database...");
         await axios.delete(`${apiUrl}/reset`);
         setStatusMessage("Database has been reset.");
+        setSelectedEvent(null);
+        setEventPhotos([]);
         fetchEvents();
         fetchDbStatus();
       } catch (error) {
@@ -300,7 +302,7 @@ export default function AdminPage() {
       <main className="min-h-screen bg-slate-50 flex items-center justify-center font-sans p-6">
         <div className="bg-white p-8 rounded-2xl shadow-xl border border-slate-100 max-w-md w-full">
           <h2 className="text-2xl font-bold text-center mb-6 text-slate-900">Admin Login</h2>
-          <form 
+          <form
             onSubmit={(e) => {
               e.preventDefault();
               if (password === (process.env.NEXT_PUBLIC_ADMIN_PASSWORD || "admin123")) {
@@ -313,8 +315,8 @@ export default function AdminPage() {
           >
             <div>
               <label className="block text-sm font-medium text-slate-700 mb-1">Password</label>
-              <input 
-                type="password" 
+              <input
+                type="password"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:outline-none"
@@ -322,7 +324,7 @@ export default function AdminPage() {
                 autoFocus
               />
             </div>
-            <button 
+            <button
               type="submit"
               className="w-full bg-indigo-600 text-white px-6 py-3 rounded-xl font-bold hover:bg-indigo-700 transition-all shadow-lg shadow-indigo-200"
             >
@@ -367,8 +369,8 @@ export default function AdminPage() {
                   {events.length > 0 ? (
                     <div className="grid grid-cols-1 gap-4">
                       {events.map(event => (
-                        <div 
-                          key={getEventId(event)} 
+                        <div
+                          key={getEventId(event)}
                           onClick={() => setSelectedEvent(event)}
                           className="p-4 bg-slate-50 rounded-xl border border-slate-100 hover:border-indigo-300 hover:bg-indigo-50 cursor-pointer transition-all flex justify-between items-center group"
                         >
@@ -406,7 +408,7 @@ export default function AdminPage() {
                     </button>
                   </div>
                 </div>
-                
+
                 {statusMessage && (
                   <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-4">
                     <div className="text-center text-sm text-slate-600 bg-slate-100 p-3 rounded-lg">
@@ -549,13 +551,13 @@ export default function AdminPage() {
           <div className="space-y-8">
             {/* Toolbar */}
             <div className="flex flex-col sm:flex-row gap-4 justify-between items-start sm:items-center">
-              <button 
+              <button
                 onClick={() => setSelectedEvent(null)}
                 className="text-slate-500 hover:text-slate-800 flex items-center gap-2 transition-colors"
               >
                 &larr; Back to Events
               </button>
-              <button 
+              <button
                 onClick={copyShareLink}
                 className="bg-indigo-50 text-indigo-700 border border-indigo-200 px-4 py-2 rounded-lg font-semibold hover:bg-indigo-100 transition-colors flex items-center gap-2"
               >
@@ -577,7 +579,7 @@ export default function AdminPage() {
                   className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:outline-none"
                   disabled={syncing}
                 />
-                
+
                 <button
                   onClick={handleSyncDrive}
                   disabled={!folderUrl.trim() || syncing}
@@ -588,18 +590,18 @@ export default function AdminPage() {
               </div>
 
               {syncProgress.active && syncProgress.total > 0 && (
-                  <div className="mt-6">
-                    <div className="flex justify-between text-sm text-slate-600 mb-2 font-medium">
-                        <span>Importing Photos...</span>
-                        <span>{syncProgress.current} / {syncProgress.total}</span>
-                    </div>
-                    <div className="w-full bg-slate-100 rounded-full h-3">
-                      <div 
-                        className="bg-indigo-600 h-3 rounded-full transition-all duration-300 ease-out" 
-                        style={{ width: `${Math.min(100, (syncProgress.current / syncProgress.total) * 100)}%` }}
-                      ></div>
-                    </div>
+                <div className="mt-6">
+                  <div className="flex justify-between text-sm text-slate-600 mb-2 font-medium">
+                    <span>Importing Photos...</span>
+                    <span>{syncProgress.current} / {syncProgress.total}</span>
                   </div>
+                  <div className="w-full bg-slate-100 rounded-full h-3">
+                    <div
+                      className="bg-indigo-600 h-3 rounded-full transition-all duration-300 ease-out"
+                      style={{ width: `${Math.min(100, (syncProgress.current / syncProgress.total) * 100)}%` }}
+                    ></div>
+                  </div>
+                </div>
               )}
 
               {statusMessage && (
@@ -609,33 +611,33 @@ export default function AdminPage() {
               )}
             </div>
 
-          {/* Photos Grid */}
-          <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-6">
-            <h2 className="text-lg font-semibold mb-4">Event Photos ({eventPhotos.length})</h2>
-            {eventPhotos.length === 0 ? (
-              <p className="text-slate-400 text-sm text-center py-8">No photos uploaded yet.</p>
-            ) : (
-              <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-4">
-                {eventPhotos.map((photo) => (
-                  <div key={photo.photo_id} className="relative group aspect-square rounded-lg overflow-hidden bg-slate-100">
-                    <img 
-                      src={`${apiUrl}/static/${photo.file_path}`} 
-                      alt="Event photo" 
-                      className="w-full h-full object-cover"
-                      loading="lazy"
-                    />
-                    <button
-                      onClick={() => handleDeletePhoto(photo.photo_id)}
-                      className="absolute top-2 right-2 bg-red-600 text-white p-1.5 rounded-full opacity-0 group-hover:opacity-100 transition-opacity hover:bg-red-700 shadow-sm"
-                      title="Delete Photo"
-                    >
-                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
-                    </button>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
+            {/* Photos Grid */}
+            <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-6">
+              <h2 className="text-lg font-semibold mb-4">Event Photos ({eventPhotos.length})</h2>
+              {eventPhotos.length === 0 ? (
+                <p className="text-slate-400 text-sm text-center py-8">No photos uploaded yet.</p>
+              ) : (
+                <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-4">
+                  {eventPhotos.map((photo) => (
+                    <div key={photo.photo_id} className="relative group aspect-square rounded-lg overflow-hidden bg-slate-100">
+                      <img
+                        src={`${apiUrl}/static/${photo.file_path}`}
+                        alt="Event photo"
+                        className="w-full h-full object-cover"
+                        loading="lazy"
+                      />
+                      <button
+                        onClick={() => handleDeletePhoto(photo.photo_id)}
+                        className="absolute top-2 right-2 bg-red-600 text-white p-1.5 rounded-full opacity-0 group-hover:opacity-100 transition-opacity hover:bg-red-700 shadow-sm"
+                        title="Delete Photo"
+                      >
+                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
           </div>
         )}
       </div>
