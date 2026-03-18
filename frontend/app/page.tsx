@@ -12,19 +12,17 @@ export default function Home() {
   
   // Login State
   const [eventCode, setEventCode] = useState("");
-  const [mobile, setMobile] = useState("");
-  const [otp, setOtp] = useState("");
-  const [username, setUsername] = useState("");
-  const [otpSent, setOtpSent] = useState(false);
+  const [checkingEvent, setCheckingEvent] = useState(false);
 
   // Search State
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [preview, setPreview] = useState<string | null>(null);
   
   // Results State
-  const [results, setResults] = useState<string[]>([]);
+  const [results, setResults] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
   const [progress, setProgress] = useState(0);
+  const [searchError, setSearchError] = useState<string | null>(null);
 
   const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
@@ -34,32 +32,39 @@ export default function Home() {
     const code = params.get("eventCode");
     if (code) {
       setEventCode(code);
+      validateAndEnter(code);
     }
   }, []);
 
   // --- Login Handlers ---
-
-  const handleSendOtp = () => {
-    if (mobile.length < 10) return alert("Please enter a valid mobile number");
-    setOtpSent(true);
-    // Mock API call for OTP
-    console.log("OTP sent to", mobile);
+  
+  const validateAndEnter = async (code: string) => {
+    setCheckingEvent(true);
+    try {
+      await axios.get(`${apiUrl}/events/${code}`);
+      setView("search");
+    } catch (error) {
+      console.error(error);
+      // Stay on login page if invalid
+    } finally {
+      setCheckingEvent(false);
+    }
   };
 
   const handleLogin = async () => {
-    if (otp !== "1234") return alert("Invalid OTP (Use 1234)"); // Mock OTP validation
-    if (!username.trim()) return alert("Please enter your name");
     if (!eventCode) return alert("Please enter an Event Code");
 
+    setCheckingEvent(true);
     // Validate Event Code against Backend
     try {
       await axios.get(`${apiUrl}/events/${eventCode}`);
+      setView("search");
     } catch (error) {
       console.error(error);
-      return alert("Invalid Event Code. Please check and try again.");
+      alert("Invalid Event Code. Please check and try again.");
+    } finally {
+      setCheckingEvent(false);
     }
-
-    setView("search");
   };
 
   // --- Camera/File Handlers ---
@@ -78,6 +83,7 @@ export default function Home() {
     setLoading(true);
     setResults([]);
     setProgress(0);
+    setSearchError(null);
     
     const formData = new FormData();
     formData.append("file", selectedFile);
@@ -95,9 +101,10 @@ export default function Home() {
       });
       setResults(response.data.matches);
       setView("results");
-    } catch (error) {
+    } catch (error: any) {
       console.error("Search failed", error);
-      alert("Search failed. Ensure backend is running.");
+      const errorMsg = error.response?.data?.detail || "Search failed. Please try again.";
+      setSearchError(errorMsg);
     } finally {
       setLoading(false);
     }
@@ -115,16 +122,17 @@ export default function Home() {
           <h1 className="text-2xl font-serif font-bold text-slate-900">Wedding Memories</h1>
           {view !== "login" && (
             <div className="flex items-center gap-4">
-              <span className="text-sm font-medium text-slate-600 hidden sm:block">Welcome, {username}</span>
-              <button onClick={() => setView("login")} className="text-sm text-red-500 hover:bg-red-50 px-3 py-1 rounded-full transition-colors">
-                Logout
+              <span className="text-sm font-medium text-slate-600 hidden sm:block">Event: {eventCode}</span>
+              <button 
+                onClick={() => { 
+                  setView("login"); 
+                  window.history.pushState({}, '', '/'); 
+                }} 
+                className="text-sm text-red-500 hover:bg-red-50 px-3 py-1 rounded-full transition-colors"
+               >
+                Leave Event
               </button>
             </div>
-          )}
-          {view === "login" && (
-            <Link href="/admin" className="text-sm text-indigo-600 hover:bg-indigo-50 px-3 py-1 rounded-full transition-colors">
-              Admin
-            </Link>
           )}
         </div>
       </header>
@@ -134,7 +142,7 @@ export default function Home() {
         {/* VIEW: LOGIN */}
         {view === "login" && (
           <div className="max-w-md mx-auto bg-white rounded-2xl shadow-xl border border-slate-100 p-8 animate-fade-in">
-            <h2 className="text-2xl font-semibold mb-6 text-center">Guest Login</h2>
+            <h2 className="text-2xl font-semibold mb-6 text-center">Join Event</h2>
             
             <div className="space-y-4">
               <div>
@@ -143,60 +151,19 @@ export default function Home() {
                   type="text" 
                   value={eventCode} 
                   onChange={(e) => setEventCode(e.target.value)} 
+                  onKeyDown={(e) => e.key === 'Enter' && handleLogin()}
                   placeholder="e.g. WED2024"
                   className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:outline-none"
                 />
               </div>
 
-              {!otpSent ? (
-                <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-1">Mobile Number</label>
-                  <div className="flex gap-2">
-                    <input 
-                      type="tel" 
-                      value={mobile} 
-                      onChange={(e) => setMobile(e.target.value)} 
-                      placeholder="9876543210"
-                      className="flex-1 px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:outline-none"
-                    />
-                    <button 
-                      onClick={handleSendOtp}
-                      className="bg-indigo-600 text-white px-4 py-3 rounded-xl font-medium hover:bg-indigo-700 transition-colors"
-                    >
-                      Send OTP
-                    </button>
-                  </div>
-                </div>
-              ) : (
-                <div className="space-y-4 animate-slide-up">
-                  <div>
-                    <label className="block text-sm font-medium text-slate-700 mb-1">Enter OTP (Use 1234)</label>
-                    <input 
-                      type="text" 
-                      value={otp} 
-                      onChange={(e) => setOtp(e.target.value)} 
-                      className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:outline-none text-center tracking-widest text-lg"
-                      maxLength={4}
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-sm font-medium text-slate-700 mb-1">Your Name</label>
-                    <input 
-                      type="text" 
-                      value={username} 
-                      onChange={(e) => setUsername(e.target.value)} 
-                      placeholder="John Doe"
-                      className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:outline-none"
-                    />
-                  </div>
-                  <button 
-                    onClick={handleLogin}
-                    className="w-full bg-indigo-600 text-white px-6 py-3 rounded-xl font-bold hover:bg-indigo-700 transition-all shadow-lg shadow-indigo-200"
-                  >
-                    Enter Event
-                  </button>
-                </div>
-              )}
+              <button 
+                onClick={handleLogin}
+                disabled={checkingEvent}
+                className="w-full bg-indigo-600 text-white px-6 py-3 rounded-xl font-bold hover:bg-indigo-700 transition-all shadow-lg shadow-indigo-200 disabled:opacity-70 disabled:cursor-not-allowed"
+              >
+                {checkingEvent ? "Checking..." : "Enter Event"}
+              </button>
             </div>
           </div>
         )}
@@ -220,6 +187,26 @@ export default function Home() {
                 )}
               </div>
             
+              {/* Error Alert */}
+              {searchError && (
+                <div className="w-full max-w-sm mb-4 animate-in fade-in slide-in-from-top-2 duration-300">
+                  <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-xl flex items-start gap-3 text-left">
+                    <svg className="w-5 h-5 mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                    </svg>
+                    <div className="flex-1">
+                      <p className="text-sm font-semibold mb-0.5">Wait, something's not right</p>
+                      <p className="text-xs opacity-90">{searchError}</p>
+                    </div>
+                    <button onClick={() => setSearchError(null)} className="text-red-400 hover:text-red-600 transition-colors">
+                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" />
+                      </svg>
+                    </button>
+                  </div>
+                </div>
+              )}
+
               {/* Controls */}
               <div className="flex flex-col gap-3 w-full max-w-xs">
                 
@@ -273,20 +260,17 @@ export default function Home() {
             ) : (
               /* Masonry Grid using CSS columns */
               <div className="columns-2 md:columns-3 gap-4 space-y-4">
-                {results.map((path, idx) => (
+                {results.map((photo, idx) => (
                   <div key={idx} className="break-inside-avoid relative group overflow-hidden rounded-xl shadow-md hover:shadow-xl transition-all duration-300">
                     <img
-                      src={getDriveThumbUrl(path)}
-                      onError={(e) => {
-                        e.currentTarget.src = getDriveFullUrl(path);
-                      }}
+                      src={`${apiUrl}${photo.url}`}
                       alt={`Match ${idx}`}
                       className="w-full h-auto object-cover transform transition duration-700 group-hover:scale-105"
                       loading="lazy"
                     />
                     <div className="absolute inset-0 bg-black/0 group-hover:bg-black/10 transition-colors pointer-events-none" />
                     <a 
-                      href={`${getDriveFullUrl(path)}&export=download`}
+                      href={`${apiUrl}${photo.download_url}`}
                       target="_blank" 
                       download
                       className="absolute bottom-3 right-3 bg-white/90 p-2 rounded-full opacity-0 group-hover:opacity-100 transition-opacity text-slate-800 hover:text-indigo-600 shadow-sm"

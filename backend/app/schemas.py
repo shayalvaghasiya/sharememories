@@ -4,6 +4,8 @@ from pydantic import BaseModel
 
 class PhotoBase(BaseModel):
     file_path: str
+    drive_file_id: Optional[str] = None
+    thumbnail_path: Optional[str] = None
 
 class Photo(PhotoBase):
     photo_id: int

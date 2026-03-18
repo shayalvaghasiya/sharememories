@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import axios from "axios";
 import Link from "next/link";
 
@@ -16,19 +16,47 @@ interface Photo {
   file_path: string;
 }
 
+interface DbSummary {
+  total_events: number;
+  total_photos: number;
+  pending: number;
+  completed: number;
+  failed: number;
+  total_faces: number;
+}
+
+interface DbPhoto {
+  photo_id: number;
+  event_id: number;
+  file_path: string;
+  drive_file_id: string | null;
+  processing_status: string;
+  faces_count: number;
+  uploaded_at: string | null;
+}
+
 const getDriveThumbUrl = (id: string) => `https://drive.google.com/thumbnail?id=${id}&sz=w400`;
 const getDriveFullUrl = (id: string) => `https://drive.google.com/uc?id=${id}`;
 
 export default function AdminPage() {
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [password, setPassword] = useState("");
   const [events, setEvents] = useState<Event[]>([]);
   const [newEventName, setNewEventName] = useState("");
   const [selectedEvent, setSelectedEvent] = useState<Event | null>(null);
   const [eventPhotos, setEventPhotos] = useState<Photo[]>([]);
-  const [files, setFiles] = useState<File[]>([]);
-  const [uploading, setUploading] = useState(false);
-  const [uploadProgress, setUploadProgress] = useState(0);
-  const [isDragging, setIsDragging] = useState(false);
+  const [folderUrl, setFolderUrl] = useState("");
+  const [syncing, setSyncing] = useState(false);
+  const [syncProgress, setSyncProgress] = useState({ active: false, current: 0, total: 0 });
   const [statusMessage, setStatusMessage] = useState("");
+
+  // DB Management state
+  const [dbSummary, setDbSummary] = useState<DbSummary | null>(null);
+  const [dbPhotos, setDbPhotos] = useState<DbPhoto[]>([]);
+  const [dbLoading, setDbLoading] = useState(false);
+  const [importing, setImporting] = useState(false);
+  const [importMessage, setImportMessage] = useState("");
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
@@ -51,6 +79,19 @@ export default function AdminPage() {
     }
   }, [apiUrl]);
 
+  const fetchDbStatus = useCallback(async () => {
+    try {
+      setDbLoading(true);
+      const response = await axios.get(`${apiUrl}/admin/db-status`);
+      setDbSummary(response.data.summary);
+      setDbPhotos(response.data.photos);
+    } catch (error) {
+      console.error("Failed to fetch DB status", error);
+    } finally {
+      setDbLoading(false);
+    }
+  }, [apiUrl]);
+
   useEffect(() => {
     if (selectedEvent) {
       fetchEventPhotos(getEventId(selectedEvent));
@@ -60,6 +101,15 @@ export default function AdminPage() {
   useEffect(() => {
     fetchEvents();
   }, [fetchEvents]);
+
+  // Auto-refresh DB status every 5 seconds when authenticated and on main view
+  useEffect(() => {
+    if (isAuthenticated && !selectedEvent) {
+      fetchDbStatus();
+      const interval = setInterval(fetchDbStatus, 5000);
+      return () => clearInterval(interval);
+    }
+  }, [isAuthenticated, selectedEvent, fetchDbStatus]);
 
   const handleCreateEvent = async (e: React.MouseEvent) => {
     e.preventDefault();
@@ -76,55 +126,76 @@ export default function AdminPage() {
     }
   };
 
-  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files) {
-      setFiles(Array.from(e.target.files));
-    }
-  };
+  const handleSyncDrive = async () => {
+    if (!folderUrl.trim() || !selectedEvent) return;
 
-  const handleUpload = async () => {
-    if (files.length === 0 || !selectedEvent) return;
-
-    setUploading(true);
-    setUploadProgress(0);
-    setStatusMessage(`Preparing Google Drive upload...`);
+    setSyncing(true);
+    setStatusMessage("Starting sync initialization...");
+    setSyncProgress({ active: true, current: 0, total: 100 }); 
 
     try {
-      // 1. Get pre-signed URLs from backend
-      const fileInfos = files.map(f => ({ filename: f.name, contentType: f.type || 'application/octet-stream' }));
-      const urlRes = await axios.post(`${apiUrl}/events/${getEventId(selectedEvent)}/upload-urls`, fileInfos);
-      const uploadUrls = urlRes.data.uploadUrls;
-
-      const fileIds = [];
-      let completed = 0;
-
-      // 2. Upload directly to Google Drive (sequentially to ensure accurate progress tracking)
-      for (let i = 0; i < files.length; i++) {
-        setStatusMessage(`Uploading ${i + 1} of ${files.length} to Drive...`);
-        const res = await axios.put(uploadUrls[i], files[i], {
-          headers: { 'Content-Type': fileInfos[i].contentType },
-          onUploadProgress: (progressEvent) => {
-            const total = progressEvent.total || progressEvent.loaded;
-            const percentCompleted = Math.round(((completed + (progressEvent.loaded / total)) / files.length) * 100);
-            setUploadProgress(percentCompleted);
-          },
-        });
-        fileIds.push(res.data.id);
-        completed++;
+      const response = await axios.post(`${apiUrl}/events/${getEventId(selectedEvent)}/sync-drive`, {
+        folder_url: folderUrl
+      });
+      
+      const { new_found, total_found } = response.data;
+      
+      if (new_found === 0) {
+        setStatusMessage(`All ${total_found} images in the folder are already synced.`);
+        setSyncProgress({ active: false, current: 0, total: 0 });
+        setSyncing(false);
+        setFolderUrl("");
+        return;
       }
-
-      // 3. Confirm uploads with backend
-      setStatusMessage(`Confirming upload with server...`);
-      await axios.post(`${apiUrl}/events/${getEventId(selectedEvent)}/confirm-upload`, { file_ids: fileIds });
-
-      setStatusMessage(`Successfully uploaded ${files.length} photos to Google Drive. They are now being indexed.`);
-      setFiles([]);
-      fetchEventPhotos(getEventId(selectedEvent));
+      
+      setStatusMessage(`Syncing ${new_found} new photos...`);
+      setSyncProgress({ active: true, current: 0, total: new_found });
+      
+      let currentPhotosCount = eventPhotos.length;
+      let targetCount = currentPhotosCount + new_found;
+      let consecutiveNoProgress = 0;
+      let lastCount = currentPhotosCount;
+      
+      const interval = setInterval(async () => {
+        try {
+          const photosRes = await axios.get(`${apiUrl}/events/${getEventId(selectedEvent)}/photos`);
+          const newPhotos = photosRes.data;
+          
+          setEventPhotos(newPhotos);
+          
+          let syncedNow = newPhotos.length - currentPhotosCount;
+          if (syncedNow < 0) syncedNow = 0; 
+          
+          setSyncProgress(prev => ({ ...prev, current: syncedNow }));
+          
+          if (newPhotos.length === lastCount) {
+            consecutiveNoProgress++;
+          } else {
+            consecutiveNoProgress = 0;
+            lastCount = newPhotos.length;
+          }
+          
+          if (newPhotos.length >= targetCount || consecutiveNoProgress > 20) {
+            clearInterval(interval);
+            setSyncProgress({ active: false, current: 0, total: 0 });
+            setSyncing(false);
+            setFolderUrl("");
+            if (newPhotos.length >= targetCount) {
+                setStatusMessage(`Sync complete! Successfully imported ${new_found} new photos.`);
+            } else {
+                setStatusMessage(`Sync paused or encountered errors. Imported ${syncedNow} photos.`);
+            }
+          }
+        } catch (e) {
+          console.error("Polling error", e);
+        }
+      }, 2000);
+      
     } catch (error) {
-      console.error("Upload failed", error);
-      setStatusMessage("Error: Upload failed. Please check the console.");
-    } finally {
-      setUploading(false);
+      console.error("Sync failed", error);
+      setStatusMessage("Error: Failed to initiate Google Drive sync.");
+      setSyncing(false);
+      setSyncProgress({ active: false, current: 0, total: 0 });
     }
   };
 
@@ -146,6 +217,7 @@ export default function AdminPage() {
         await axios.delete(`${apiUrl}/reset`);
         setStatusMessage("Database has been reset.");
         fetchEvents();
+        fetchDbStatus();
       } catch (error) {
         console.error("Reset failed", error);
         setStatusMessage("Error: Failed to reset database.");
@@ -153,23 +225,49 @@ export default function AdminPage() {
     }
   };
 
-  // Drag and drop handlers
-  const handleDragOver = (e: React.DragEvent<HTMLDivElement>) => {
-    e.preventDefault();
-    setIsDragging(true);
+  const handleExportDb = async () => {
+    try {
+      const response = await axios.get(`${apiUrl}/admin/db-export`, { responseType: "blob" });
+      const url = window.URL.createObjectURL(new Blob([response.data]));
+      const link = document.createElement("a");
+      link.href = url;
+      link.setAttribute("download", `sharememories_backup_${new Date().toISOString().slice(0, 10)}.json`);
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.URL.revokeObjectURL(url);
+      setImportMessage("Database exported successfully!");
+      setTimeout(() => setImportMessage(""), 3000);
+    } catch (error) {
+      console.error("Export failed", error);
+      setImportMessage("Error: Failed to export database.");
+    }
   };
 
-  const handleDragLeave = (e: React.DragEvent<HTMLDivElement>) => {
-    e.preventDefault();
-    setIsDragging(false);
-  };
+  const handleImportDb = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
 
-  const handleDrop = (e: React.DragEvent<HTMLDivElement>) => {
-    e.preventDefault();
-    setIsDragging(false);
-    if (e.dataTransfer.files) {
-      setFiles(Array.from(e.dataTransfer.files));
-      setStatusMessage(`${e.dataTransfer.files.length} files selected.`);
+    if (!window.confirm("This will import data into the database. Existing data will NOT be overwritten. Continue?")) {
+      if (fileInputRef.current) fileInputRef.current.value = "";
+      return;
+    }
+
+    setImporting(true);
+    setImportMessage("Importing...");
+    try {
+      const formData = new FormData();
+      formData.append("file", file);
+      const response = await axios.post(`${apiUrl}/admin/db-import`, formData);
+      setImportMessage(`✅ ${response.data.message}`);
+      fetchEvents();
+      fetchDbStatus();
+    } catch (error: any) {
+      console.error("Import failed", error);
+      setImportMessage(`❌ Import failed: ${error.response?.data?.detail || error.message}`);
+    } finally {
+      setImporting(false);
+      if (fileInputRef.current) fileInputRef.current.value = "";
     }
   };
 
@@ -183,6 +281,61 @@ export default function AdminPage() {
     navigator.clipboard.writeText(link);
     alert("Link copied to clipboard: " + link);
   };
+
+  const statusBadge = (status: string) => {
+    const styles: Record<string, string> = {
+      pending: "bg-amber-100 text-amber-700 border-amber-200",
+      completed: "bg-emerald-100 text-emerald-700 border-emerald-200",
+      failed: "bg-red-100 text-red-700 border-red-200",
+    };
+    return (
+      <span className={`px-2 py-0.5 rounded-full text-xs font-semibold border ${styles[status] || styles.pending}`}>
+        {status}
+      </span>
+    );
+  };
+
+  if (!isAuthenticated) {
+    return (
+      <main className="min-h-screen bg-slate-50 flex items-center justify-center font-sans p-6">
+        <div className="bg-white p-8 rounded-2xl shadow-xl border border-slate-100 max-w-md w-full">
+          <h2 className="text-2xl font-bold text-center mb-6 text-slate-900">Admin Login</h2>
+          <form 
+            onSubmit={(e) => {
+              e.preventDefault();
+              if (password === (process.env.NEXT_PUBLIC_ADMIN_PASSWORD || "admin123")) {
+                setIsAuthenticated(true);
+              } else {
+                alert("Incorrect password");
+              }
+            }}
+            className="space-y-4"
+          >
+            <div>
+              <label className="block text-sm font-medium text-slate-700 mb-1">Password</label>
+              <input 
+                type="password" 
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+                placeholder="Enter admin password"
+                autoFocus
+              />
+            </div>
+            <button 
+              type="submit"
+              className="w-full bg-indigo-600 text-white px-6 py-3 rounded-xl font-bold hover:bg-indigo-700 transition-all shadow-lg shadow-indigo-200"
+            >
+              Login
+            </button>
+            <div className="text-center mt-4">
+              <Link href="/" className="text-sm text-slate-500 hover:text-slate-700">Back to Guest View</Link>
+            </div>
+          </form>
+        </div>
+      </main>
+    );
+  }
 
   return (
     <main className="min-h-screen bg-slate-50 text-slate-800 font-sans">
@@ -206,71 +359,189 @@ export default function AdminPage() {
       <div className="max-w-6xl mx-auto p-6">
         {!selectedEvent ? (
           // VIEW: EVENTS LIST
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
-            <div className="md:col-span-2 space-y-6">
-              <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-6">
-                <h2 className="text-lg font-semibold mb-4">Your Events</h2>
-                {events.length > 0 ? (
-                  <div className="grid grid-cols-1 gap-4">
-                    {events.map(event => (
-                      <div 
-                        key={getEventId(event)} 
-                        onClick={() => setSelectedEvent(event)}
-                        className="p-4 bg-slate-50 rounded-xl border border-slate-100 hover:border-indigo-300 hover:bg-indigo-50 cursor-pointer transition-all flex justify-between items-center group"
-                      >
-                        <div>
-                          <p className="font-medium text-slate-800 text-lg">{getEventName(event)}</p>
-                          <p className="text-slate-400 font-mono text-xs">ID: {getEventId(event)}</p>
+          <div className="space-y-8">
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
+              <div className="md:col-span-2 space-y-6">
+                <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-6">
+                  <h2 className="text-lg font-semibold mb-4">Your Events</h2>
+                  {events.length > 0 ? (
+                    <div className="grid grid-cols-1 gap-4">
+                      {events.map(event => (
+                        <div 
+                          key={getEventId(event)} 
+                          onClick={() => setSelectedEvent(event)}
+                          className="p-4 bg-slate-50 rounded-xl border border-slate-100 hover:border-indigo-300 hover:bg-indigo-50 cursor-pointer transition-all flex justify-between items-center group"
+                        >
+                          <div>
+                            <p className="font-medium text-slate-800 text-lg">{getEventName(event)}</p>
+                            <p className="text-slate-400 font-mono text-xs">ID: {getEventId(event)}</p>
+                          </div>
+                          <span className="text-indigo-600 opacity-0 group-hover:opacity-100 font-medium text-sm transition-opacity">Manage &rarr;</span>
                         </div>
-                        <span className="text-indigo-600 opacity-0 group-hover:opacity-100 font-medium text-sm transition-opacity">Manage &rarr;</span>
-                      </div>
-                    ))}
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="text-slate-400 text-sm">No events found. Create one to get started.</p>
+                  )}
+                </div>
+              </div>
+
+              <div className="md:col-span-1 space-y-6">
+                <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-6">
+                  <h2 className="text-lg font-semibold mb-4">Create New Event</h2>
+                  <div className="flex flex-col gap-3">
+                    <input
+                      type="text"
+                      value={newEventName}
+                      onChange={(e) => setNewEventName(e.target.value)}
+                      placeholder="e.g., Rohan & Priya's Wedding"
+                      className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+                    />
+                    <button
+                      type="button"
+                      onClick={handleCreateEvent}
+                      className="w-full bg-indigo-600 text-white px-4 py-2 rounded-lg font-semibold hover:bg-indigo-700 transition-colors shadow-sm"
+                    >
+                      Create Event
+                    </button>
                   </div>
-                ) : (
-                  <p className="text-slate-400 text-sm">No events found. Create one to get started.</p>
+                </div>
+                
+                {statusMessage && (
+                  <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-4">
+                    <div className="text-center text-sm text-slate-600 bg-slate-100 p-3 rounded-lg">
+                      {statusMessage}
+                    </div>
+                  </div>
                 )}
+
+                <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-6">
+                  <h2 className="text-lg font-semibold mb-4 text-red-600">Danger Zone</h2>
+                  <button
+                    onClick={handleReset}
+                    className="w-full bg-red-50 text-red-600 border border-red-200 px-4 py-2 rounded-lg font-semibold hover:bg-red-100 hover:border-red-300 transition-colors"
+                  >
+                    Reset All Data
+                  </button>
+                  <p className="text-xs text-slate-400 mt-2">This will delete all events, photos, and indexed faces from the database.</p>
+                </div>
               </div>
             </div>
 
-            <div className="md:col-span-1 space-y-6">
-              <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-6">
-                <h2 className="text-lg font-semibold mb-4">Create New Event</h2>
-                <div className="flex flex-col gap-3">
-                  <input
-                    type="text"
-                    value={newEventName}
-                    onChange={(e) => setNewEventName(e.target.value)}
-                    placeholder="e.g., Rohan & Priya's Wedding"
-                    className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:outline-none"
-                  />
-                  <button
-                    type="button"
-                    onClick={handleCreateEvent}
-                    className="w-full bg-indigo-600 text-white px-4 py-2 rounded-lg font-semibold hover:bg-indigo-700 transition-colors shadow-sm"
-                  >
-                    Create Event
-                  </button>
-                </div>
+            {/* ==================== DATABASE MANAGEMENT SECTION ==================== */}
+            <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-6">
+              <div className="flex items-center justify-between mb-6">
+                <h2 className="text-lg font-semibold flex items-center gap-2">
+                  <svg className="w-5 h-5 text-indigo-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4m0 5c0 2.21-3.582 4-8 4s-8-1.79-8-4" /></svg>
+                  Database Management
+                </h2>
+                <button
+                  onClick={fetchDbStatus}
+                  disabled={dbLoading}
+                  className="text-sm text-indigo-600 hover:text-indigo-800 font-medium disabled:text-slate-400 flex items-center gap-1"
+                >
+                  <svg className={`w-4 h-4 ${dbLoading ? "animate-spin" : ""}`} fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" /></svg>
+                  Refresh
+                </button>
               </div>
-              
-              {statusMessage && (
-                <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-4">
-                  <div className="text-center text-sm text-slate-600 bg-slate-100 p-3 rounded-lg">
-                    {statusMessage}
+
+              {/* Status Overview Cards */}
+              {dbSummary && (
+                <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-4 mb-6">
+                  <div className="bg-slate-50 rounded-xl p-4 border border-slate-100 text-center">
+                    <p className="text-2xl font-bold text-slate-800">{dbSummary.total_events}</p>
+                    <p className="text-xs text-slate-500 font-medium mt-1">Events</p>
+                  </div>
+                  <div className="bg-slate-50 rounded-xl p-4 border border-slate-100 text-center">
+                    <p className="text-2xl font-bold text-slate-800">{dbSummary.total_photos}</p>
+                    <p className="text-xs text-slate-500 font-medium mt-1">Total Photos</p>
+                  </div>
+                  <div className="bg-amber-50 rounded-xl p-4 border border-amber-100 text-center">
+                    <p className="text-2xl font-bold text-amber-600">{dbSummary.pending}</p>
+                    <p className="text-xs text-amber-600 font-medium mt-1">Pending</p>
+                  </div>
+                  <div className="bg-emerald-50 rounded-xl p-4 border border-emerald-100 text-center">
+                    <p className="text-2xl font-bold text-emerald-600">{dbSummary.completed}</p>
+                    <p className="text-xs text-emerald-600 font-medium mt-1">Completed</p>
+                  </div>
+                  <div className="bg-red-50 rounded-xl p-4 border border-red-100 text-center">
+                    <p className="text-2xl font-bold text-red-600">{dbSummary.failed}</p>
+                    <p className="text-xs text-red-600 font-medium mt-1">Failed</p>
+                  </div>
+                  <div className="bg-indigo-50 rounded-xl p-4 border border-indigo-100 text-center">
+                    <p className="text-2xl font-bold text-indigo-600">{dbSummary.total_faces}</p>
+                    <p className="text-xs text-indigo-600 font-medium mt-1">Faces Indexed</p>
                   </div>
                 </div>
               )}
 
-              <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-6">
-                <h2 className="text-lg font-semibold mb-4 text-red-600">Danger Zone</h2>
+              {/* Export / Import Buttons */}
+              <div className="flex flex-col sm:flex-row gap-4 mb-6">
                 <button
-                  onClick={handleReset}
-                  className="w-full bg-red-50 text-red-600 border border-red-200 px-4 py-2 rounded-lg font-semibold hover:bg-red-100 hover:border-red-300 transition-colors"
+                  onClick={handleExportDb}
+                  className="flex-1 bg-emerald-600 text-white px-4 py-3 rounded-xl font-semibold hover:bg-emerald-700 transition-all shadow-sm flex items-center justify-center gap-2"
                 >
-                  Reset All Data
+                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" /></svg>
+                  Export Database (Backup)
                 </button>
-                <p className="text-xs text-slate-400 mt-2">This will delete all events, photos, and indexed faces from the database.</p>
+                <label className="flex-1">
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    accept=".json"
+                    onChange={handleImportDb}
+                    className="hidden"
+                    disabled={importing}
+                  />
+                  <div className={`w-full px-4 py-3 rounded-xl font-semibold transition-all shadow-sm flex items-center justify-center gap-2 cursor-pointer ${importing ? "bg-slate-200 text-slate-400" : "bg-blue-600 text-white hover:bg-blue-700"}`}>
+                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" /></svg>
+                    {importing ? "Importing..." : "Import Database (Restore)"}
+                  </div>
+                </label>
               </div>
+
+              {importMessage && (
+                <div className={`text-center text-sm p-3 rounded-lg mb-6 ${importMessage.startsWith("✅") ? "bg-emerald-50 text-emerald-700" : importMessage.startsWith("❌") ? "bg-red-50 text-red-700" : "bg-blue-50 text-blue-700"}`}>
+                  {importMessage}
+                </div>
+              )}
+
+              {/* Processing Status Table */}
+              {dbPhotos.length > 0 && (
+                <div>
+                  <h3 className="text-sm font-semibold text-slate-600 mb-3">Processing Status ({dbPhotos.length} photos)</h3>
+                  <div className="overflow-auto max-h-80 rounded-xl border border-slate-200">
+                    <table className="w-full text-sm">
+                      <thead className="bg-slate-50 sticky top-0">
+                        <tr>
+                          <th className="text-left px-4 py-2 text-slate-500 font-medium">ID</th>
+                          <th className="text-left px-4 py-2 text-slate-500 font-medium">Event</th>
+                          <th className="text-left px-4 py-2 text-slate-500 font-medium">File</th>
+                          <th className="text-left px-4 py-2 text-slate-500 font-medium">Status</th>
+                          <th className="text-left px-4 py-2 text-slate-500 font-medium">Faces</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {dbPhotos.map((photo) => (
+                          <tr key={photo.photo_id} className="hover:bg-slate-50 transition-colors">
+                            <td className="px-4 py-2 font-mono text-xs text-slate-500">{photo.photo_id}</td>
+                            <td className="px-4 py-2 font-mono text-xs text-slate-500">{photo.event_id}</td>
+                            <td className="px-4 py-2 text-slate-700 max-w-[200px] truncate" title={photo.file_path}>
+                              {photo.drive_file_id || photo.file_path.split("/").pop() || photo.file_path}
+                            </td>
+                            <td className="px-4 py-2">{statusBadge(photo.processing_status)}</td>
+                            <td className="px-4 py-2 text-slate-700">{photo.faces_count}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+
+              {dbPhotos.length === 0 && dbSummary && (
+                <p className="text-sm text-slate-400 text-center py-4">No photos in the database yet.</p>
+              )}
             </div>
           </div>
         ) : (
@@ -293,53 +564,50 @@ export default function AdminPage() {
               </button>
             </div>
 
-            {/* Upload Area */}
+            {/* Sync Area */}
             <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-6">
-            <h2 className="text-lg font-semibold mb-4">Upload Photos</h2>
-            <div 
-              onDragOver={handleDragOver}
-              onDragLeave={handleDragLeave}
-              onDrop={handleDrop}
-              className={`border-2 border-dashed rounded-xl p-8 text-center transition-colors ${isDragging ? 'border-indigo-500 bg-indigo-50' : 'border-slate-200 bg-slate-50'}`}
-            >
-              <p className="text-slate-500 mb-4">Drag & drop photos here, or click to select files.</p>
-              <input
-                type="file"
-                multiple
-                onChange={handleFileSelect}
-                className="hidden"
-                id="file-upload"
-              />
-              <label htmlFor="file-upload" className="cursor-pointer bg-white text-slate-600 px-4 py-2 rounded-lg border border-slate-300 hover:bg-slate-50 font-semibold">
-                Select Files
-              </label>
-            </div>
-
-            {files.length > 0 && (
-              <div className="mt-6">
-                <h3 className="text-md font-medium mb-2">{files.length} file(s) selected:</h3>
-                <ul className="text-sm text-slate-500 list-disc list-inside max-h-40 overflow-y-auto bg-slate-50 p-3 rounded-lg">
-                  {files.map((file, i) => <li key={i} className="truncate">{file.name}</li>)}
-                </ul>
+              <h2 className="text-lg font-semibold mb-4">Sync from Google Drive</h2>
+              <div className="flex flex-col gap-4">
+                <p className="text-sm text-slate-500">Paste a Google Drive Folder Link to automatically import all images.</p>
+                <input
+                  type="text"
+                  value={folderUrl}
+                  onChange={(e) => setFolderUrl(e.target.value)}
+                  placeholder="https://drive.google.com/drive/folders/..."
+                  className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+                  disabled={syncing}
+                />
+                
+                <button
+                  onClick={handleSyncDrive}
+                  disabled={!folderUrl.trim() || syncing}
+                  className="w-full bg-indigo-600 text-white px-6 py-3 rounded-xl hover:bg-indigo-700 disabled:bg-slate-200 disabled:text-slate-400 font-semibold transition-all shadow-sm active:scale-95"
+                >
+                  {syncing ? "Sync in Progress..." : "Sync Folder"}
+                </button>
               </div>
-            )}
 
-            <div className="mt-6">
-              <button
-                onClick={handleUpload}
-                disabled={files.length === 0 || uploading}
-                className="w-full bg-indigo-600 text-white px-6 py-3 rounded-xl hover:bg-indigo-700 disabled:bg-slate-200 disabled:text-slate-400 font-semibold transition-all shadow-sm active:scale-95"
-              >
-                {uploading ? `Uploading... ${uploadProgress}%` : `Upload ${files.length} Photos`}
-              </button>
+              {syncProgress.active && syncProgress.total > 0 && (
+                  <div className="mt-6">
+                    <div className="flex justify-between text-sm text-slate-600 mb-2 font-medium">
+                        <span>Importing Photos...</span>
+                        <span>{syncProgress.current} / {syncProgress.total}</span>
+                    </div>
+                    <div className="w-full bg-slate-100 rounded-full h-3">
+                      <div 
+                        className="bg-indigo-600 h-3 rounded-full transition-all duration-300 ease-out" 
+                        style={{ width: `${Math.min(100, (syncProgress.current / syncProgress.total) * 100)}%` }}
+                      ></div>
+                    </div>
+                  </div>
+              )}
+
+              {statusMessage && (
+                <div className="mt-4 text-center text-sm text-slate-600 bg-slate-100 p-3 rounded-lg">
+                  {statusMessage}
+                </div>
+              )}
             </div>
-
-            {statusMessage && (
-              <div className="mt-4 text-center text-sm text-slate-600 bg-slate-100 p-3 rounded-lg">
-                {statusMessage}
-              </div>
-            )}
-          </div>
 
           {/* Photos Grid */}
           <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-6">
@@ -351,11 +619,7 @@ export default function AdminPage() {
                 {eventPhotos.map((photo) => (
                   <div key={photo.photo_id} className="relative group aspect-square rounded-lg overflow-hidden bg-slate-100">
                     <img 
-                      src={getDriveThumbUrl(photo.file_path)} 
-                      onError={(e) => {
-                        // Fallback to original image if Drive thumbnail fails
-                        e.currentTarget.src = getDriveFullUrl(photo.file_path);
-                      }}
+                      src={`${apiUrl}/static/${photo.file_path}`} 
                       alt="Event photo" 
                       className="w-full h-full object-cover"
                       loading="lazy"

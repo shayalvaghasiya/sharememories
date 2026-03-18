@@ -47,11 +47,20 @@ def process_photo_task(photo_id: int, file_id: str):
         res = requests.get(f'https://www.googleapis.com/drive/v3/files/{file_id}?alt=media', headers={'Authorization': f'Bearer {token}'})
         
         if res.status_code != 200:
+            # Mark as failed if download fails
+            photo = db.query(models.Photo).filter(models.Photo.photo_id == photo_id).first()
+            if photo:
+                photo.processing_status = "failed"
+                db.commit()
             return f"Error downloading from Drive: {res.text}"
 
         nparr = np.frombuffer(res.content, np.uint8)
         img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
         if img is None:
+            photo = db.query(models.Photo).filter(models.Photo.photo_id == photo_id).first()
+            if photo:
+                photo.processing_status = "failed"
+                db.commit()
             return f"Error: Could not decode image {file_id}"
 
         # Downscale massive images before passing to InsightFace to save RAM
@@ -74,10 +83,24 @@ def process_photo_task(photo_id: int, file_id: str):
             )
             db.add(new_face)
         
+        # Update processing status
+        photo = db.query(models.Photo).filter(models.Photo.photo_id == photo_id).first()
+        if photo:
+            photo.processing_status = "completed"
+            photo.faces_count = len(faces)
+        
         db.commit()
         return f"Processed {len(faces)} faces for photo {photo_id}"
     except Exception as e:
         print(f"Error processing {photo_id}: {e}")
+        # Mark as failed on any exception
+        try:
+            photo = db.query(models.Photo).filter(models.Photo.photo_id == photo_id).first()
+            if photo:
+                photo.processing_status = "failed"
+                db.commit()
+        except Exception:
+            pass
         return f"Error: {e}"
     finally:
         db.close()

@@ -1,4 +1,5 @@
 import os
+import io
 import time
 import json
 import requests
@@ -9,7 +10,9 @@ import numpy as np
 from typing import List
 from celery import Celery
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Request, Form
+from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Request, Form, BackgroundTasks
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import StreamingResponse, JSONResponse
 from insightface.app import FaceAnalysis
 from sqlalchemy.orm import Session
 from sqlalchemy import text
@@ -38,6 +41,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+os.makedirs("/storage", exist_ok=True)
+app.mount("/static", StaticFiles(directory="/storage"), name="static")
 
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
@@ -75,9 +81,19 @@ def get_drive_token():
 # Create tables and enable vector extension on startup
 @app.on_event("startup")
 def startup_event():
-    # Enable pgvector extension
+    # Enable pgvector extension and migrate schema seamlessly
     with database.engine.connect() as conn:
         conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
+        
+        # Try-except block to ignore errors if the table doesn't exist yet
+        try:
+            conn.execute(text("ALTER TABLE photos ADD COLUMN IF NOT EXISTS drive_file_id VARCHAR"))
+            conn.execute(text("ALTER TABLE photos ADD COLUMN IF NOT EXISTS thumbnail_path VARCHAR"))
+            conn.execute(text("ALTER TABLE photos ADD COLUMN IF NOT EXISTS processing_status VARCHAR DEFAULT 'pending'"))
+            conn.execute(text("ALTER TABLE photos ADD COLUMN IF NOT EXISTS faces_count INTEGER DEFAULT 0"))
+        except Exception as e:
+            logger.info(f"Schema alter skipped (table might not exist yet): {e}")
+            
         conn.commit()
     
     # Create tables
@@ -126,6 +142,132 @@ class FileInfo(BaseModel):
 
 class ConfirmUploadRequest(BaseModel):
     file_ids: List[str]
+
+class SyncDriveRequest(BaseModel):
+    folder_url: str
+
+def process_drive_sync(event_id: int, files: list):
+    db: Session = database.SessionLocal()
+    try:
+        logger.info(f"Starting background sync for {len(files)} files.")
+        token = get_drive_token()
+        headers = {"Authorization": f"Bearer {token}"}
+        storage_path = f"/storage/events/{event_id}/thumbnails"
+        os.makedirs(storage_path, exist_ok=True)
+        
+        for f in files:
+            file_id = f['id']
+            # Download image into memory
+            dl_url = f"https://www.googleapis.com/drive/v3/files/{file_id}?alt=media"
+            dl_res = requests.get(dl_url, headers=headers)
+            if dl_res.status_code != 200:
+                logger.error(f"Failed to download {file_id}")
+                continue
+                
+            try:
+                nparr = np.frombuffer(dl_res.content, np.uint8)
+                img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                if img is None:
+                    continue
+                    
+                height, width = img.shape[:2]
+                max_dim = 600
+                if max(height, width) > max_dim:
+                    scale = max_dim / max(height, width)
+                    img = cv2.resize(img, (int(width * scale), int(height * scale)))
+                    
+                thumb_filename = f"{file_id}.jpg"
+                thumb_path = f"{storage_path}/{thumb_filename}"
+                cv2.imwrite(thumb_path, img)
+                
+                new_photo = models.Photo(
+                    event_id=event_id, 
+                    file_path=f"events/{event_id}/thumbnails/{thumb_filename}",
+                    drive_file_id=file_id,
+                    thumbnail_path=thumb_path
+                )
+                db.add(new_photo)
+                db.commit()
+                db.refresh(new_photo)
+                
+                celery_client.send_task("process_photo_task", args=[new_photo.photo_id, thumb_path])
+                
+            except Exception as e:
+                logger.error(f"Error processing {file_id}: {e}")
+                continue
+    except Exception as e:
+        logger.error(f"Fatal error in background sync: {e}")
+    finally:
+        db.close()
+        logger.info("Background sync completed.")
+
+@app.post("/events/{event_id}/sync-drive")
+def sync_drive_folder(
+    event_id: int, 
+    payload: SyncDriveRequest, 
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(database.get_db)
+):
+    logger.info(f"Received sync drive request for event {event_id}: {payload.folder_url}")
+    event = db.query(models.Event).filter(models.Event.event_id == event_id).first()
+    if not event:
+        raise HTTPException(status_code=404, detail="Event not found")
+
+    import re
+    folder_id = payload.folder_url
+    match = re.search(r'folders/([a-zA-Z0-9_-]+)', payload.folder_url)
+    if match:
+        folder_id = match.group(1)
+    else:
+        match_id = re.search(r'id=([a-zA-Z0-9_-]+)', payload.folder_url)
+        if match_id:
+            folder_id = match_id.group(1)
+
+    token = get_drive_token()
+    headers = {"Authorization": f"Bearer {token}"}
+    
+    query = f"'{folder_id}' in parents and mimeType contains 'image/' and trashed = false"
+    url = f"https://www.googleapis.com/drive/v3/files?q={requests.utils.quote(query)}&fields=files(id,name,mimeType)"
+    
+    res = requests.get(url, headers=headers)
+    if res.status_code != 200:
+        raise HTTPException(status_code=400, detail=f"Failed to access Google Drive folder: {res.text}")
+        
+    files = res.json().get('files', [])
+    if not files:
+        return {"message": "No images found in the folder.", "synced_count": 0, "total_found": 0, "new_found": 0}
+
+    # Identify new files
+    existing_photos = db.query(models.Photo.drive_file_id).filter(models.Photo.event_id == event_id).all()
+    existing_ids = {p[0] for p in existing_photos if p[0]}
+    new_files = [f for f in files if f['id'] not in existing_ids]
+
+    if not new_files:
+        return {"message": "All images already synced.", "synced_count": 0, "total_found": len(files), "new_found": 0}
+
+    background_tasks.add_task(process_drive_sync, event_id, new_files)
+    
+    return {"message": "Sync started", "synced_count": 0, "total_found": len(files), "new_found": len(new_files)}
+
+@app.get("/photos/{photo_id}/download")
+def download_photo(photo_id: int, db: Session = Depends(database.get_db)):
+    photo = db.query(models.Photo).filter(models.Photo.photo_id == photo_id).first()
+    if not photo or not photo.drive_file_id:
+        raise HTTPException(status_code=404, detail="Photo not found")
+        
+    token = get_drive_token()
+    headers = {"Authorization": f"Bearer {token}"}
+    dl_url = f"https://www.googleapis.com/drive/v3/files/{photo.drive_file_id}?alt=media"
+    
+    res = requests.get(dl_url, headers=headers, stream=True)
+    if res.status_code != 200:
+        raise HTTPException(status_code=res.status_code, detail="Failed to fetch from Google Drive")
+        
+    return StreamingResponse(
+        res.iter_content(chunk_size=1024*1024), 
+        media_type=res.headers.get("Content-Type", "image/jpeg"),
+        headers={"Content-Disposition": f"attachment; filename=photo_{photo_id}.jpg"}
+    )
 
 @app.post("/events/{event_id}/upload-urls")
 def get_upload_urls(event_id: int, files: List[FileInfo], request: Request, db: Session = Depends(database.get_db)):
@@ -180,6 +322,76 @@ def confirm_upload(event_id: int, payload: ConfirmUploadRequest, db: Session = D
         db.refresh(new_photo)
         celery_client.send_task("process_photo_task", args=[new_photo.photo_id, new_photo.file_path])
     return {"message": "Upload confirmed"}
+
+@app.post("/events/{event_id}/upload-cloud")
+def upload_photos_cloud(
+    event_id: int, 
+    files: List[UploadFile] = File(...), 
+    db: Session = Depends(database.get_db)
+):
+    logger.info(f"Received cloud upload request for event {event_id} with {len(files)} files.")
+    event = db.query(models.Event).filter(models.Event.event_id == event_id).first()
+    if not event:
+        raise HTTPException(status_code=404, detail="Event not found")
+
+    token = get_drive_token()
+    folder_id = os.getenv("GOOGLE_DRIVE_FOLDER_ID")
+    saved_photos = []
+
+    try:
+        for file in files:
+            content_type = file.content_type or "application/octet-stream"
+            # 1. Start Resumable Upload Session
+            metadata = {
+                "name": file.filename,
+                "parents": [folder_id]
+            }
+            headers = {
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+                "X-Upload-Content-Type": content_type
+            }
+            res = requests.post(
+                "https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&supportsAllDrives=true",
+                headers=headers,
+                json=metadata
+            )
+            if res.status_code != 200:
+                logger.error(f"Failed to create upload session: {res.text}")
+                continue
+
+            upload_url = res.headers.get('Location')
+            
+            # 2. Upload the bytes
+            file.file.seek(0)
+            file_bytes = file.file.read()
+            put_res = requests.put(upload_url, data=file_bytes, headers={"Content-Type": content_type})
+            
+            if put_res.status_code in (200, 201, 308):
+                file_id = put_res.json().get('id') if put_res.status_code in (200, 201) else None
+                if not file_id:
+                    # In some cases 200/201 might not return JSON or might not be final
+                    # If this happens and we don't have file_id, handle accordingly
+                    pass
+                if file_id:
+                    # 3. Save to DB
+                    new_photo = models.Photo(event_id=event_id, file_path=file_id)
+                    db.add(new_photo)
+                    db.commit()
+                    db.refresh(new_photo)
+                    celery_client.send_task("process_photo_task", args=[new_photo.photo_id, new_photo.file_path])
+                    saved_photos.append(new_photo.photo_id)
+            else:
+                logger.error(f"Failed to upload file bytes: {put_res.text}")
+
+        if not saved_photos:
+            raise HTTPException(status_code=500, detail="Failed to successfully upload photos to Google Drive.")
+
+        return {"message": "Upload successful", "photo_ids": saved_photos}
+    except Exception as e:
+        logger.error(f"Cloud upload failed: {e}")
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
 
 @app.post("/events/{event_id}/upload")
 def upload_photos(
@@ -292,8 +504,10 @@ def search_faces(
         logger.warning("No face detected in uploaded photo")
         raise HTTPException(status_code=400, detail="No face detected. Please try a clearer selfie.")
     
-    # Use the largest face found
-    faces.sort(key=lambda x: (x.bbox[2]-x.bbox[0]) * (x.bbox[3]-x.bbox[1]), reverse=True)
+    if len(faces) > 1:
+        logger.warning(f"Multiple faces detected: {len(faces)}")
+        raise HTTPException(status_code=400, detail=f"Found {len(faces)} faces in the photo. Please upload a clear photo of ONLY yourself for accurate matching.")
+
     user_embedding = faces[0].embedding.tolist()
 
     # Search using pgvector cosine distance
@@ -311,7 +525,199 @@ def search_faces(
         .limit(50).all()
 
     logger.info(f"Found {len(results)} matches. Total time: {time.time() - start_time:.2f}s")
-    return {"matches": [photo.file_path for photo in results]}
+    matches = [
+        {
+            "photo_id": photo.photo_id, 
+            "url": f"/static/{photo.file_path}", 
+            "download_url": f"/photos/{photo.photo_id}/download"
+        } 
+        for photo in results
+    ]
+    return {"matches": matches}
+
+# ==================== ADMIN DATABASE MANAGEMENT ====================
+
+@app.get("/admin/db-status")
+def get_db_status(db: Session = Depends(database.get_db)):
+    """Returns processing status overview and per-photo details."""
+    total = db.query(models.Photo).count()
+    pending = db.query(models.Photo).filter(models.Photo.processing_status == "pending").count()
+    completed = db.query(models.Photo).filter(models.Photo.processing_status == "completed").count()
+    failed = db.query(models.Photo).filter(models.Photo.processing_status == "failed").count()
+    total_faces = db.query(models.Face).count()
+    total_events = db.query(models.Event).count()
+
+    # Get per-photo status list (most recent first)
+    photos = db.query(models.Photo).order_by(models.Photo.photo_id.desc()).all()
+    photo_list = [
+        {
+            "photo_id": p.photo_id,
+            "event_id": p.event_id,
+            "file_path": p.file_path,
+            "drive_file_id": p.drive_file_id,
+            "processing_status": p.processing_status or "pending",
+            "faces_count": p.faces_count or 0,
+            "uploaded_at": p.uploaded_at.isoformat() if p.uploaded_at else None,
+        }
+        for p in photos
+    ]
+
+    return {
+        "summary": {
+            "total_events": total_events,
+            "total_photos": total,
+            "pending": pending,
+            "completed": completed,
+            "failed": failed,
+            "total_faces": total_faces,
+        },
+        "photos": photo_list,
+    }
+
+
+@app.get("/admin/db-export")
+def export_database(db: Session = Depends(database.get_db)):
+    """Exports entire database state as a downloadable JSON file."""
+    logger.info("Exporting database snapshot...")
+
+    events = db.query(models.Event).all()
+    events_data = [
+        {
+            "event_id": e.event_id,
+            "event_name": e.event_name,
+            "event_date": e.event_date.isoformat() if e.event_date else None,
+            "created_at": e.created_at.isoformat() if e.created_at else None,
+        }
+        for e in events
+    ]
+
+    photos = db.query(models.Photo).all()
+    photos_data = [
+        {
+            "photo_id": p.photo_id,
+            "event_id": p.event_id,
+            "file_path": p.file_path,
+            "drive_file_id": p.drive_file_id,
+            "thumbnail_path": p.thumbnail_path,
+            "processing_status": p.processing_status or "pending",
+            "faces_count": p.faces_count or 0,
+            "uploaded_at": p.uploaded_at.isoformat() if p.uploaded_at else None,
+        }
+        for p in photos
+    ]
+
+    faces = db.query(models.Face).all()
+    faces_data = [
+        {
+            "face_id": f.face_id,
+            "photo_id": f.photo_id,
+            "embedding": list(f.embedding) if f.embedding is not None else [],
+        }
+        for f in faces
+    ]
+
+    snapshot = {
+        "exported_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "events": events_data,
+        "photos": photos_data,
+        "faces": faces_data,
+    }
+
+    json_bytes = json.dumps(snapshot, indent=2).encode("utf-8")
+    return StreamingResponse(
+        io.BytesIO(json_bytes),
+        media_type="application/json",
+        headers={"Content-Disposition": "attachment; filename=sharememories_backup.json"},
+    )
+
+
+class ImportResult(BaseModel):
+    events_imported: int = 0
+    photos_imported: int = 0
+    faces_imported: int = 0
+    message: str = ""
+
+
+@app.post("/admin/db-import", response_model=ImportResult)
+async def import_database(file: UploadFile = File(...), db: Session = Depends(database.get_db)):
+    """Imports a JSON snapshot to restore database state."""
+    logger.info("Importing database snapshot...")
+    try:
+        content = await file.read()
+        snapshot = json.loads(content)
+
+        events_count = 0
+        photos_count = 0
+        faces_count = 0
+
+        # Import events
+        for ev in snapshot.get("events", []):
+            existing = db.query(models.Event).filter(models.Event.event_id == ev["event_id"]).first()
+            if not existing:
+                from datetime import datetime
+                new_event = models.Event(
+                    event_id=ev["event_id"],
+                    event_name=ev["event_name"],
+                    event_date=datetime.fromisoformat(ev["event_date"]) if ev.get("event_date") else None,
+                )
+                db.add(new_event)
+                events_count += 1
+
+        db.flush()
+
+        # Import photos
+        for ph in snapshot.get("photos", []):
+            existing = db.query(models.Photo).filter(models.Photo.photo_id == ph["photo_id"]).first()
+            if not existing:
+                new_photo = models.Photo(
+                    photo_id=ph["photo_id"],
+                    event_id=ph["event_id"],
+                    file_path=ph["file_path"],
+                    drive_file_id=ph.get("drive_file_id"),
+                    thumbnail_path=ph.get("thumbnail_path"),
+                    processing_status=ph.get("processing_status", "pending"),
+                    faces_count=ph.get("faces_count", 0),
+                )
+                db.add(new_photo)
+                photos_count += 1
+
+        db.flush()
+
+        # Import faces
+        for fc in snapshot.get("faces", []):
+            existing = db.query(models.Face).filter(models.Face.face_id == fc["face_id"]).first()
+            if not existing:
+                new_face = models.Face(
+                    face_id=fc["face_id"],
+                    photo_id=fc["photo_id"],
+                    embedding=fc.get("embedding", []),
+                )
+                db.add(new_face)
+                faces_count += 1
+
+        db.commit()
+
+        # Reset sequences so future inserts don't collide
+        db.execute(text("SELECT setval('events_event_id_seq', COALESCE((SELECT MAX(event_id) FROM events), 0) + 1, false)"))
+        db.execute(text("SELECT setval('photos_photo_id_seq', COALESCE((SELECT MAX(photo_id) FROM photos), 0) + 1, false)"))
+        db.execute(text("SELECT setval('faces_face_id_seq', COALESCE((SELECT MAX(face_id) FROM faces), 0) + 1, false)"))
+        db.commit()
+
+        msg = f"Imported {events_count} events, {photos_count} photos, {faces_count} faces."
+        logger.info(msg)
+        return ImportResult(
+            events_imported=events_count,
+            photos_imported=photos_count,
+            faces_imported=faces_count,
+            message=msg,
+        )
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=400, detail="Invalid JSON file.")
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Import failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Import failed: {str(e)}")
+
 
 @app.delete("/reset")
 def reset_system(db: Session = Depends(database.get_db)):

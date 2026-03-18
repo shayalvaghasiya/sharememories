@@ -19,10 +19,14 @@ class Photo(Base):
     photo_id = Column(Integer, primary_key=True, index=True)
     event_id = Column(Integer, ForeignKey("events.event_id"))
     file_path = Column(String, nullable=False)
+    drive_file_id = Column(String, nullable=True)
+    thumbnail_path = Column(String, nullable=True)
+    processing_status = Column(String, default="pending", nullable=False)
+    faces_count = Column(Integer, default=0, nullable=False)
     uploaded_at = Column(DateTime, default=func.now())
     
     event = relationship("Event", back_populates="photos")
-    faces = relationship("Face", back_populates="photo")
+    faces = relationship("Face", back_populates="photo", cascade="all, delete-orphan")
 
 class Face(Base):
     __tablename__ = "faces"
