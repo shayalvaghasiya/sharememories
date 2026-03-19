@@ -112,3 +112,25 @@ wedding-ai/
     ```bash
     curl -X DELETE http://localhost:8000/reset
     ```
+
+    - **Create Backup**
+  - To create a backup of the database and application, run:
+    ```bash
+    chmod +x complete_migration.sh
+    ./complete_migration.sh
+
+
+    # Create a folder for the project and extract the contents
+    mkdir ShareMemories
+    tar -xzvf sharememories_migration_*.tar.gz -C ShareMemories
+    cd ShareMemories
+
+    docker-compose up -d db redis
+
+    # The SQL dump was packed inside the tarball, we can pipe it directly into the new db container
+    cat wedding_db_backup.sql | docker exec -i wedding_db psql -U admin -d wedding_db
+
+    # Build and start the backend, worker, and frontend
+    docker-compose up -d --build
+
+    ```

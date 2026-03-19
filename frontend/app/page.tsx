@@ -75,35 +75,58 @@ export default function Home() {
   // Download Multiple Photos Function
   const downloadPhotos = async (photosToDownload: any[]) => {
     if (photosToDownload.length === 0) return;
-    
+
+    if (photosToDownload.length === 1) {
+      setIsDownloading(true);
+      try {
+        const photo = photosToDownload[0];
+        const response = await fetch(`${apiUrl}${photo.download_url}`);
+        if (!response.ok) throw new Error("Network response was not ok");
+
+        const arrayBuffer = await response.arrayBuffer();
+        const blob = new Blob([arrayBuffer], { type: "image/jpeg" });
+
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.style.display = "none";
+        a.href = url;
+        a.download = `photo_${photo.photo_id}.jpg`;
+        document.body.appendChild(a);
+        a.click();
+
+        setTimeout(() => {
+          if (document.body.contains(a)) document.body.removeChild(a);
+          window.URL.revokeObjectURL(url);
+        }, 1000);
+      } catch (error) {
+        console.error("Failed to download photo", error);
+      } finally {
+        setIsDownloading(false);
+      }
+      return;
+    }
+
     setIsDownloading(true);
     setDownloadProgress({ current: 0, total: photosToDownload.length });
-    
-    try {
-      for (let i = 0; i < photosToDownload.length; i++) {
-        const photo = photosToDownload[i];
-        setDownloadProgress({ current: i + 1, total: photosToDownload.length });
-        
-        try {
-          const a = document.createElement("a");
-          a.style.display = "none";
-          a.href = `${apiUrl}${photo.download_url}`;
-          a.download = `photo_${photo.photo_id}.jpg`;
-          a.target = "_blank"; // Added to help some browsers distinguish consecutive triggers
-          document.body.appendChild(a);
-          a.click();
 
-          // Keep in DOM longer to ensure the action is processed
-          setTimeout(() => {
-            if (document.body.contains(a)) document.body.removeChild(a);
-          }, 3000);
-          
-          // Increased delay to 1200ms to be more browser-friendly
-          await new Promise(resolve => setTimeout(resolve, 1200));
-        } catch (error) {
-          console.error("Failed to initiate download for photo", photo.photo_id, error);
-        }
-      }
+    try {
+      const photoIds = photosToDownload.map((p) => p.photo_id).join(",");
+      const downloadUrl = `${apiUrl}/events/${eventCode}/download-zip?photo_ids=${photoIds}`;
+
+      // Stream directly to the browser's download manager instead of buffering in memory
+      const a = document.createElement("a");
+      a.style.display = "none";
+      a.href = downloadUrl;
+      a.download = `memories_${eventCode}.zip`; // Content-Disposition handles the name too
+      document.body.appendChild(a);
+      a.click();
+
+      setTimeout(() => {
+        if (document.body.contains(a)) document.body.removeChild(a);
+      }, 3000);
+    } catch (error) {
+      console.error("Failed to download zip", error);
+      alert("Failed to download multiple photos. Please try again.");
     } finally {
       // Small delay after last one before resetting UI
       await new Promise(resolve => setTimeout(resolve, 800));
@@ -159,8 +182,8 @@ export default function Home() {
   };
 
   // Helper to resolve backend drive ID to Google Drive URL
-  const getDriveThumbUrl = (id: string) => `https://drive.google.com/thumbnail?id=${id}&sz=w600`;
-  const getDriveFullUrl = (id: string) => `https://drive.google.com/uc?id=${id}`;
+  const getDriveThumbUrl = (id: string) => `https://drive.google.com/thumbnail?id=&sz=w600`;
+  const getDriveFullUrl = (id: string) => `https://drive.google.com/uc?id=`;
 
   return (
     <main className="min-h-screen bg-slate-50 text-slate-800 font-sans">
@@ -293,14 +316,14 @@ export default function Home() {
           <div className="animate-fade-in">
             {/* Header Info & New Search */}
             <div className="flex flex-col items-center text-center mb-10 gap-4">
-              <button 
-                onClick={() => setView("search")} 
+              <button
+                onClick={() => setView("search")}
                 className="group flex items-center gap-2 text-sm font-semibold text-indigo-600 bg-indigo-50 px-5 py-2.5 rounded-full hover:bg-indigo-100 active:scale-95 transition-all shadow-sm"
               >
                 <svg className="w-4 h-4 transform group-hover:-translate-x-1 transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10 19l-7-7m0 0l7-7m-7 7h18"></path></svg>
                 Try another selfie
               </button>
-              
+
               <div className="mt-2">
                 <h2 className="text-3xl font-bold text-slate-900 tracking-tight">Your Memories</h2>
                 <p className="text-slate-500 mt-1 font-medium">We found {results.length} photos you appeared in</p>
@@ -313,12 +336,12 @@ export default function Home() {
                   <div className="w-full mb-6 p-4 bg-amber-50 border border-amber-200 rounded-2xl flex items-start gap-3 shadow-sm animate-in fade-in slide-in-from-top-4 duration-500">
                     <svg className="w-5 h-5 text-amber-500 mt-0.5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
                     <div className="text-sm text-amber-800 leading-relaxed">
-                      <p className="font-bold mb-0.5">Downloading Multiple Photos...</p>
-                      <p className="opacity-90">If it stops, please check your browser address bar for a "Blocked" icon and select <strong>"Always allow multiple downloads"</strong>.</p>
+                      <p className="font-bold mb-0.5">Packaging Photos...</p>
+                      <p className="opacity-90">Please wait while we compress your selected photos into a single ZIP file.</p>
                     </div>
                   </div>
                 )}
-                
+
                 <div className="inline-flex items-center bg-white p-2 rounded-2xl shadow-xl border border-slate-100 animate-in slide-in-from-bottom-4 duration-500">
                   {isSelectMode ? (
                     <div className="flex items-center gap-2">
@@ -334,9 +357,9 @@ export default function Home() {
                       >
                         {selectedPhotos.size === results.length ? "Deselect All" : "Select All"}
                       </button>
-                      
+
                       <div className="w-px h-6 bg-slate-200 mx-1" />
-                      
+
                       <button
                         onClick={() => {
                           const photosToDownload = results.filter((p: any) => selectedPhotos.has(p.photo_id));
@@ -351,7 +374,7 @@ export default function Home() {
                               <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none"></circle>
                               <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
                             </svg>
-                            {downloadProgress.total > 1 ? `Downloading ${downloadProgress.current} / ${downloadProgress.total}` : "Downloading..."}
+                            {downloadProgress.total > 1 ? `Packaging ${downloadProgress.total} Photos...` : "Downloading..."}
                           </>
                         ) : (
                           <>
@@ -360,7 +383,7 @@ export default function Home() {
                           </>
                         )}
                       </button>
-                      
+
                       <button
                         onClick={() => {
                           setIsSelectMode(false);
@@ -380,9 +403,9 @@ export default function Home() {
                         <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"></path></svg>
                         Select Photos
                       </button>
-                      
+
                       <div className="w-px h-6 bg-slate-200 mx-1" />
-                      
+
                       <button
                         onClick={() => downloadPhotos(results)}
                         disabled={isDownloading}
@@ -394,7 +417,7 @@ export default function Home() {
                               <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none"></circle>
                               <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
                             </svg>
-                            {downloadProgress.total > 1 ? `Downloading ${downloadProgress.current} / ${downloadProgress.total}` : "Downloading..."}
+                            {downloadProgress.total > 1 ? `Packaging ${downloadProgress.total} Photos...` : "Downloading..."}
                           </>
                         ) : (
                           <>
@@ -436,7 +459,7 @@ export default function Home() {
                     >
                       <img
                         src={`${apiUrl}${photo.url}`}
-                        alt={`Match ${idx}`}
+                        alt={`Match `}
                         className={`w-full h-auto object-cover transform transition duration-700 ${!isSelectMode && 'group-hover:scale-105'} ${isSelected ? 'opacity-90' : ''}`}
                         loading="lazy"
                       />

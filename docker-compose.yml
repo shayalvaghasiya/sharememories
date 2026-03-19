@@ -46,7 +46,7 @@ services:
   worker:
     build: ./backend
     container_name: wedding_worker
-    command: celery -A app.worker.celery worker --loglevel=info --concurrency=1
+    command: celery -A app.worker.celery worker --loglevel=info --concurrency=4
     volumes:
       - ./backend:/app
       - ./storage:/storage

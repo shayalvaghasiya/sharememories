@@ -8,6 +8,9 @@ import uuid
 import logging
 import cv2
 import numpy as np
+import zipfile
+from datetime import datetime
+from stream_zip import ZIP_DEFLATED, stream_zip
 from typing import List
 from celery import Celery
 from fastapi.middleware.cors import CORSMiddleware
@@ -48,7 +51,7 @@ app = FastAPI(title="Wedding AI API")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://keep-frankfurt-occurrence-mit.trycloudflare.com", "http://localhost:3000"], 
+    allow_origins=["https://largest-partly-delays-advertise.trycloudflare.com", "http://localhost:3000"], 
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -202,6 +205,13 @@ def process_drive_sync(event_id: int, files: list):
                     # Download image into memory
                     dl_url = f"https://www.googleapis.com/drive/v3/files/{file_id}?alt=media"
                     dl_res = requests.get(dl_url, headers=headers)
+                    
+                    if dl_res.status_code == 401:
+                        logger.info("Google Drive token expired. Refreshing...")
+                        token = get_drive_token()
+                        headers = {"Authorization": f"Bearer {token}"}
+                        dl_res = requests.get(dl_url, headers=headers)
+
                     if dl_res.status_code != 200:
                         logger.error(f"Failed to download {file_id}: {dl_res.status_code}")
                         continue
@@ -280,6 +290,13 @@ def repair_missing_photos():
                 # Download
                 dl_url = f"https://www.googleapis.com/drive/v3/files/{p.drive_file_id}?alt=media"
                 dl_res = requests.get(dl_url, headers=headers)
+                
+                if dl_res.status_code == 401:
+                    logger.info("Google Drive token expired during repair. Refreshing...")
+                    token = get_drive_token()
+                    headers = {"Authorization": f"Bearer {token}"}
+                    dl_res = requests.get(dl_url, headers=headers)
+
                 if dl_res.status_code == 200:
                     nparr = np.frombuffer(dl_res.content, np.uint8)
                     img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
@@ -398,6 +415,55 @@ def download_photo(photo_id: int, db: Session = Depends(database.get_db)):
             )
             
     raise HTTPException(status_code=404, detail="File not found on server")
+
+@app.get("/events/{event_id}/download-zip")
+def download_photos_zip(
+    event_id: int, 
+    photo_ids: str, 
+    db: Session = Depends(database.get_db)
+):
+    ids = [int(i) for i in photo_ids.split(",") if i.isdigit()]
+    if not ids:
+        raise HTTPException(status_code=400, detail="No photo IDs provided")
+        
+    photos = db.query(models.Photo).filter(models.Photo.photo_id.in_(ids), models.Photo.event_id == event_id).all()
+    
+    if not photos:
+        raise HTTPException(status_code=404, detail="No photos found")
+        
+    def zip_generator():
+        token = get_drive_token()
+        headers = {"Authorization": f"Bearer {token}"}
+        now = datetime.now()
+        
+        def get_files():
+            for photo in photos:
+                filename = f"photo_{photo.photo_id}.jpg"
+                if photo.drive_file_id:
+                    dl_url = f"https://www.googleapis.com/drive/v3/files/{photo.drive_file_id}?alt=media"
+                    # Stream from Google Drive directly into the ZIP chunk
+                    with requests.get(dl_url, headers=headers, stream=True) as res:
+                        if res.status_code == 200:
+                            yield filename, now, 0o600, ZIP_DEFLATED, res.iter_content(chunk_size=65536)
+                elif photo.file_path:
+                    actual_path = photo.file_path if photo.file_path.startswith("/") else f"/storage/{photo.file_path.lstrip('/')}"
+                    if os.path.exists(actual_path):
+                        def file_chunks():
+                            with open(actual_path, "rb") as f:
+                                while chunk := f.read(65536):
+                                    yield chunk
+                        yield filename, now, 0o600, ZIP_DEFLATED, file_chunks()
+        
+        # Stream the zip bytes directly to the client
+        yield from stream_zip(get_files())
+        
+    return StreamingResponse(
+        zip_generator(),
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": f'attachment; filename="memories_{event_id}.zip"'
+        }
+    )
 
 @app.post("/events/{event_id}/upload")
 def upload_photos(
@@ -595,6 +661,23 @@ def get_db_status(db: Session = Depends(database.get_db)):
         },
         "photos": photo_list,
     }
+
+@app.post("/admin/retry-pending")
+def retry_pending_photos(db: Session = Depends(database.get_db)):
+    """Manually re-queues any photos stuck in 'pending' or 'failed' state."""
+    logger.info("Manually triggering retry for pending/failed photos...")
+    stuck_photos = db.query(models.Photo).filter(models.Photo.processing_status.in_(["pending", "failed"])).all()
+    
+    count = 0
+    for p in stuck_photos:
+        actual_path = p.thumbnail_path or p.file_path
+        if actual_path and not actual_path.startswith("/storage"):
+            actual_path = f"/storage/{actual_path.lstrip('/')}"
+            
+        celery_client.send_task("process_photo_task", args=[p.photo_id, actual_path])
+        count += 1
+        
+    return {"message": f"Successfully re-queued {count} photos for processing.", "count": count}
 
 
 @app.get("/admin/db-export")
