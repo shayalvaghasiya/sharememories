@@ -13,8 +13,9 @@ from datetime import datetime
 from stream_zip import ZIP_64, stream_zip
 from typing import List
 from celery import Celery
+from fastapi.security import APIKeyHeader
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Request, Form, BackgroundTasks
+from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Request, Form, BackgroundTasks, Security
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import StreamingResponse, JSONResponse, FileResponse
 from insightface.app import FaceAnalysis
@@ -49,9 +50,11 @@ celery_client = Celery(__name__, broker=os.getenv("REDIS_URL"), backend=os.geten
 
 app = FastAPI(title="Wedding AI API")
 
+frontend_url = os.getenv("FRONTEND_URL", "http://localhost:3000")
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://largest-partly-delays-advertise.trycloudflare.com", "http://localhost:3000"], 
+    allow_origins=[frontend_url, "http://localhost:3000"], 
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -73,6 +76,14 @@ async def log_requests(request: Request, call_next):
     logger.info(f"Incoming request: {request.method} {request.url}")
     response = await call_next(request)
     return response
+
+api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+
+def verify_admin(api_key: str = Security(api_key_header)):
+    expected_key = os.getenv("ADMIN_PASSWORD", "admin123")
+    if not api_key or api_key != expected_key:
+        raise HTTPException(status_code=403, detail="Invalid Admin API Key")
+    return api_key
 
 # Global variable for InsightFace model
 app_face = None
@@ -149,12 +160,12 @@ def health_check(db: Session = Depends(database.get_db)):
     except Exception as e:
         return {"database": f"error: {str(e)}"}
 
-@app.get("/events", response_model=List[schemas.Event])
+@app.get("/events", response_model=List[schemas.Event], dependencies=[Depends(verify_admin)])
 def get_events(db: Session = Depends(database.get_db)):
     events = db.query(models.Event).all()
     return events
 
-@app.post("/events", response_model=schemas.Event)
+@app.post("/events", response_model=schemas.Event, dependencies=[Depends(verify_admin)])
 def create_event(event: schemas.EventCreate, db: Session = Depends(database.get_db)):
     logger.info(f"Received create event request: {event.event_name}")
     try:
@@ -326,7 +337,7 @@ def repair_missing_photos():
         db.close()
         logger.info("Background repair completed.")
 
-@app.post("/events/{event_id}/sync-drive")
+@app.post("/events/{event_id}/sync-drive", dependencies=[Depends(verify_admin)])
 def sync_drive_folder(
     event_id: int, 
     payload: SyncDriveRequest, 
@@ -465,7 +476,7 @@ def download_photos_zip(
         }
     )
 
-@app.post("/events/{event_id}/upload")
+@app.post("/events/{event_id}/upload", dependencies=[Depends(verify_admin)])
 def upload_photos(
     event_id: int, 
     files: List[UploadFile] = File(...), 
@@ -524,12 +535,12 @@ def upload_photos(
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
 
-@app.get("/events/{event_id}/photos", response_model=List[schemas.Photo])
+@app.get("/events/{event_id}/photos", response_model=List[schemas.Photo], dependencies=[Depends(verify_admin)])
 def get_event_photos(event_id: int, db: Session = Depends(database.get_db)):
     photos = db.query(models.Photo).filter(models.Photo.event_id == event_id).all()
     return photos
 
-@app.delete("/photos/{photo_id}")
+@app.delete("/photos/{photo_id}", dependencies=[Depends(verify_admin)])
 def delete_photo(photo_id: int, db: Session = Depends(database.get_db)):
     photo = db.query(models.Photo).filter(models.Photo.photo_id == photo_id).first()
     try:
@@ -624,7 +635,7 @@ def search_faces(
 
 # ==================== ADMIN DATABASE MANAGEMENT ====================
 
-@app.get("/admin/db-status")
+@app.get("/admin/db-status", dependencies=[Depends(verify_admin)])
 def get_db_status(db: Session = Depends(database.get_db)):
     """Returns processing status overview and per-photo details."""
     total = db.query(models.Photo).count()
@@ -661,7 +672,7 @@ def get_db_status(db: Session = Depends(database.get_db)):
         "photos": photo_list,
     }
 
-@app.post("/admin/retry-pending")
+@app.post("/admin/retry-pending", dependencies=[Depends(verify_admin)])
 def retry_pending_photos(db: Session = Depends(database.get_db)):
     """Manually re-queues any photos stuck in 'pending' or 'failed' state."""
     logger.info("Manually triggering retry for pending/failed photos...")
@@ -679,7 +690,7 @@ def retry_pending_photos(db: Session = Depends(database.get_db)):
     return {"message": f"Successfully re-queued {count} photos for processing.", "count": count}
 
 
-@app.get("/admin/db-export")
+@app.get("/admin/db-export", dependencies=[Depends(verify_admin)])
 def export_database(db: Session = Depends(database.get_db)):
     """Exports entire database state as a downloadable JSON file."""
     logger.info("Exporting database snapshot...")
@@ -742,7 +753,7 @@ class ImportResult(BaseModel):
     message: str = ""
 
 
-@app.post("/admin/db-import", response_model=ImportResult)
+@app.post("/admin/db-import", response_model=ImportResult, dependencies=[Depends(verify_admin)])
 async def import_database(file: UploadFile = File(...), db: Session = Depends(database.get_db)):
     """Imports a JSON snapshot to restore database state."""
     logger.info("Importing database snapshot...")
@@ -826,7 +837,7 @@ async def import_database(file: UploadFile = File(...), db: Session = Depends(da
         raise HTTPException(status_code=500, detail=f"Import failed: {str(e)}")
 
 
-@app.delete("/reset")
+@app.delete("/reset", dependencies=[Depends(verify_admin)])
 def reset_system(background_tasks: BackgroundTasks, db: Session = Depends(database.get_db)):
     logger.warning("Resetting system: Clearing database and storage.")
     

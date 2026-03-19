@@ -11,16 +11,12 @@ services:
       POSTGRES_DB: wedding_db
     volumes:
       - postgres_data:/var/lib/postgresql/data
-    ports:
-      - "5432:5432"
     restart: always
 
   # Redis for task queue management
   redis:
     image: redis:alpine
     container_name: wedding_redis
-    ports:
-      - "6379:6379"
     restart: always
 
   # The Main API Backend

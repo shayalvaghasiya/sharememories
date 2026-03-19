@@ -25,19 +25,6 @@ interface DbSummary {
   total_faces: number;
 }
 
-interface DbPhoto {
-  photo_id: number;
-  event_id: number;
-  file_path: string;
-  drive_file_id: string | null;
-  processing_status: string;
-  faces_count: number;
-  uploaded_at: string | null;
-}
-
-const getDriveThumbUrl = (id: string) => `https://drive.google.com/thumbnail?id=${id}&sz=w400`;
-const getDriveFullUrl = (id: string) => `https://drive.google.com/uc?id=${id}`;
-
 export default function AdminPage() {
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [password, setPassword] = useState("");
@@ -52,7 +39,6 @@ export default function AdminPage() {
 
   // DB Management state
   const [dbSummary, setDbSummary] = useState<DbSummary | null>(null);
-  const [dbPhotos, setDbPhotos] = useState<DbPhoto[]>([]);
   const [dbLoading, setDbLoading] = useState(false);
   const [importing, setImporting] = useState(false);
   const [exporting, setExporting] = useState(false);
@@ -64,35 +50,34 @@ export default function AdminPage() {
 
   const fetchEvents = useCallback(async () => {
     try {
-      const response = await axios.get(`${apiUrl}/events`);
+      const response = await axios.get(`${apiUrl}/events`, { headers: { "X-API-Key": password } });
       setEvents(response.data);
     } catch (error) {
       console.error("Failed to fetch events", error);
       setStatusMessage("Error: Could not fetch events from the backend.");
     }
-  }, [apiUrl]);
+  }, [apiUrl, password]);
 
   const fetchEventPhotos = useCallback(async (eventId: string) => {
     try {
-      const response = await axios.get(`${apiUrl}/events/${eventId}/photos`);
+      const response = await axios.get(`${apiUrl}/events/${eventId}/photos`, { headers: { "X-API-Key": password } });
       setEventPhotos(response.data);
     } catch (error) {
       console.error("Failed to fetch photos", error);
     }
-  }, [apiUrl]);
+  }, [apiUrl, password]);
 
   const fetchDbStatus = useCallback(async () => {
     try {
       setDbLoading(true);
-      const response = await axios.get(`${apiUrl}/admin/db-status`);
+      const response = await axios.get(`${apiUrl}/admin/db-status`, { headers: { "X-API-Key": password } });
       setDbSummary(response.data.summary);
-      setDbPhotos(response.data.photos);
     } catch (error) {
       console.error("Failed to fetch DB status", error);
     } finally {
       setDbLoading(false);
     }
-  }, [apiUrl]);
+  }, [apiUrl, password]);
 
   useEffect(() => {
     if (selectedEvent) {
@@ -104,12 +89,10 @@ export default function AdminPage() {
     fetchEvents();
   }, [fetchEvents]);
 
-  // Auto-refresh DB status every 10 seconds when authenticated and on main view
+  // Fetch DB status when authenticated and on main view
   useEffect(() => {
     if (isAuthenticated && !selectedEvent) {
       fetchDbStatus();
-      const interval = setInterval(fetchDbStatus, 10000);
-      return () => clearInterval(interval);
     }
   }, [isAuthenticated, selectedEvent, fetchDbStatus]);
 
@@ -118,7 +101,7 @@ export default function AdminPage() {
     if (!newEventName.trim()) return;
     try {
       setStatusMessage("Creating event...");
-      const response = await axios.post(`${apiUrl}/events`, { event_name: newEventName });
+      const response = await axios.post(`${apiUrl}/events`, { event_name: newEventName }, { headers: { "X-API-Key": password } });
       setStatusMessage(`Event "${response.data.event_name || response.data.name}" created.`);
       setNewEventName("");
       fetchEvents(); // Refresh the list
@@ -138,7 +121,7 @@ export default function AdminPage() {
     try {
       const response = await axios.post(`${apiUrl}/events/${getEventId(selectedEvent)}/sync-drive`, {
         folder_url: folderUrl
-      });
+      }, { headers: { "X-API-Key": password } });
 
       const { new_found, total_found } = response.data;
 
@@ -160,7 +143,7 @@ export default function AdminPage() {
 
       const interval = setInterval(async () => {
         try {
-          const photosRes = await axios.get(`${apiUrl}/events/${getEventId(selectedEvent)}/photos`);
+          const photosRes = await axios.get(`${apiUrl}/events/${getEventId(selectedEvent)}/photos`, { headers: { "X-API-Key": password } });
           const newPhotos = photosRes.data;
 
           setEventPhotos(newPhotos);
@@ -204,7 +187,7 @@ export default function AdminPage() {
   const handleDeletePhoto = async (photoId: string) => {
     if (!confirm("Are you sure you want to delete this photo?")) return;
     try {
-      await axios.delete(`${apiUrl}/photos/${photoId}`);
+      await axios.delete(`${apiUrl}/photos/${photoId}`, { headers: { "X-API-Key": password } });
       setEventPhotos(prev => prev.filter(p => p.photo_id !== photoId));
     } catch (error) {
       console.error("Delete failed", error);
@@ -217,7 +200,7 @@ export default function AdminPage() {
       try {
         setReseting(true);
         setStatusMessage("Resetting database...");
-        await axios.delete(`${apiUrl}/reset`);
+        await axios.delete(`${apiUrl}/reset`, { headers: { "X-API-Key": password } });
         setStatusMessage("Database has been reset.");
         setSelectedEvent(null);
         setEventPhotos([]);
@@ -236,7 +219,7 @@ export default function AdminPage() {
     try {
       setDbLoading(true);
       setStatusMessage("Re-queueing stuck photos...");
-      const response = await axios.post(`${apiUrl}/admin/retry-pending`);
+      const response = await axios.post(`${apiUrl}/admin/retry-pending`, {}, { headers: { "X-API-Key": password } });
       setImportMessage(`✅ ${response.data.message}`);
       fetchDbStatus();
     } catch (error) {
@@ -250,7 +233,10 @@ export default function AdminPage() {
   const handleExportDb = async () => {
     try {
       setExporting(true);
-      const response = await axios.get(`${apiUrl}/admin/db-export`, { responseType: "blob" });
+      const response = await axios.get(`${apiUrl}/admin/db-export`, { 
+        responseType: "blob",
+        headers: { "X-API-Key": password }
+      });
       const url = window.URL.createObjectURL(new Blob([response.data]));
       const link = document.createElement("a");
       link.href = url;
@@ -283,7 +269,7 @@ export default function AdminPage() {
     try {
       const formData = new FormData();
       formData.append("file", file);
-      const response = await axios.post(`${apiUrl}/admin/db-import`, formData);
+      const response = await axios.post(`${apiUrl}/admin/db-import`, formData, { headers: { "X-API-Key": password } });
       setImportMessage(`✅ ${response.data.message}`);
       fetchEvents();
       fetchDbStatus();
@@ -307,19 +293,6 @@ export default function AdminPage() {
     alert("Link copied to clipboard: " + link);
   };
 
-  const statusBadge = (status: string) => {
-    const styles: Record<string, string> = {
-      pending: "bg-amber-100 text-amber-700 border-amber-200",
-      completed: "bg-emerald-100 text-emerald-700 border-emerald-200",
-      failed: "bg-red-100 text-red-700 border-red-200",
-    };
-    return (
-      <span className={`px-2 py-0.5 rounded-full text-xs font-semibold border ${styles[status] || styles.pending}`}>
-        {status}
-      </span>
-    );
-  };
-
   if (!isAuthenticated) {
     return (
       <main className="min-h-screen bg-slate-50 flex items-center justify-center font-sans p-6">
@@ -328,11 +301,9 @@ export default function AdminPage() {
           <form
             onSubmit={(e) => {
               e.preventDefault();
-              if (password === (process.env.NEXT_PUBLIC_ADMIN_PASSWORD || "admin123")) {
-                setIsAuthenticated(true);
-              } else {
-                alert("Incorrect password");
-              }
+              axios.get(`${apiUrl}/admin/db-status`, { headers: { "X-API-Key": password } })
+                .then(() => setIsAuthenticated(true))
+                .catch(() => alert("Incorrect password"));
             }}
             className="space-y-4"
           >
@@ -575,43 +546,6 @@ export default function AdminPage() {
                 <div className={`text-center text-sm p-3 rounded-lg mb-6 ${importMessage.startsWith("✅") ? "bg-emerald-50 text-emerald-700" : importMessage.startsWith("❌") ? "bg-red-50 text-red-700" : "bg-blue-50 text-blue-700"}`}>
                   {importMessage}
                 </div>
-              )}
-
-              {/* Processing Status Table */}
-              {dbPhotos.length > 0 && (
-                <div>
-                  <h3 className="text-sm font-semibold text-slate-600 mb-3">Processing Status ({dbPhotos.length} photos)</h3>
-                  <div className="overflow-auto max-h-80 rounded-xl border border-slate-200">
-                    <table className="w-full text-sm">
-                      <thead className="bg-slate-50 sticky top-0">
-                        <tr>
-                          <th className="text-left px-4 py-2 text-slate-500 font-medium">ID</th>
-                          <th className="text-left px-4 py-2 text-slate-500 font-medium">Event</th>
-                          <th className="text-left px-4 py-2 text-slate-500 font-medium">File</th>
-                          <th className="text-left px-4 py-2 text-slate-500 font-medium">Status</th>
-                          <th className="text-left px-4 py-2 text-slate-500 font-medium">Faces</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-slate-100">
-                        {dbPhotos.map((photo) => (
-                          <tr key={photo.photo_id} className="hover:bg-slate-50 transition-colors">
-                            <td className="px-4 py-2 font-mono text-xs text-slate-500">{photo.photo_id}</td>
-                            <td className="px-4 py-2 font-mono text-xs text-slate-500">{photo.event_id}</td>
-                            <td className="px-4 py-2 text-slate-700 max-w-[200px] truncate" title={photo.file_path}>
-                              {photo.drive_file_id || photo.file_path.split("/").pop() || photo.file_path}
-                            </td>
-                            <td className="px-4 py-2">{statusBadge(photo.processing_status)}</td>
-                            <td className="px-4 py-2 text-slate-700">{photo.faces_count}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
-              )}
-
-              {dbPhotos.length === 0 && dbSummary && (
-                <p className="text-sm text-slate-400 text-center py-4">No photos in the database yet.</p>
               )}
             </div>
           </div>
