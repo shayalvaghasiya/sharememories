@@ -10,7 +10,7 @@ import cv2
 import numpy as np
 import zipfile
 from datetime import datetime
-from stream_zip import ZIP_DEFLATED, stream_zip
+from stream_zip import ZIP_64, stream_zip
 from typing import List
 from celery import Celery
 from fastapi.middleware.cors import CORSMiddleware
@@ -444,7 +444,7 @@ def download_photos_zip(
                     # Stream from Google Drive directly into the ZIP chunk
                     with requests.get(dl_url, headers=headers, stream=True) as res:
                         if res.status_code == 200:
-                            yield filename, now, 0o600, ZIP_DEFLATED, res.iter_content(chunk_size=65536)
+                            yield filename, now, 0o600, ZIP_64, res.iter_content(chunk_size=65536)
                 elif photo.file_path:
                     actual_path = photo.file_path if photo.file_path.startswith("/") else f"/storage/{photo.file_path.lstrip('/')}"
                     if os.path.exists(actual_path):
@@ -452,7 +452,7 @@ def download_photos_zip(
                             with open(actual_path, "rb") as f:
                                 while chunk := f.read(65536):
                                     yield chunk
-                        yield filename, now, 0o600, ZIP_DEFLATED, file_chunks()
+                        yield filename, now, 0o600, ZIP_64, file_chunks()
         
         # Stream the zip bytes directly to the client
         yield from stream_zip(get_files())
@@ -609,8 +609,7 @@ def search_faces(
     results = db.query(models.Photo).join(models.Face)\
         .filter(models.Photo.event_id == event_id)\
         .filter(models.Face.embedding.cosine_distance(user_embedding) < 0.6)\
-        .order_by(models.Face.embedding.cosine_distance(user_embedding))\
-        .limit(50).all()
+        .order_by(models.Face.embedding.cosine_distance(user_embedding)).all()
 
     logger.info(f"Found {len(results)} matches. Total time: {time.time() - start_time:.2f}s")
     matches = [

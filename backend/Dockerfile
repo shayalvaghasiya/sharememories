@@ -1,7 +1,7 @@
 FROM python:3.10-slim
 
 # Install system dependencies required for OpenCV and InsightFace
-RUN apt-get update && apt-get install -y \
+RUN apt-get update && apt-get install -y --no-install-recommends \
     libgl1 \
     libglib2.0-0 \
     build-essential \
@@ -18,3 +18,6 @@ COPY . .
 
 # Expose the port FastAPI runs on
 EXPOSE 8000
+
+# Default command to run the application (can be overridden by docker-compose)
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

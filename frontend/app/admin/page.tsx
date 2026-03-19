@@ -562,7 +562,7 @@ export default function AdminPage() {
               </div>
 
               {/* Retry Stuck Photos Button */}
-              {(dbSummary?.pending > 0 || dbSummary?.failed > 0) && (
+              {dbSummary && (dbSummary.pending > 0 || dbSummary.failed > 0) && (
                 <div className="flex mb-6 animate-in fade-in zoom-in duration-300">
                   <button onClick={handleRetryPending} disabled={dbLoading} className="w-full bg-amber-100 text-amber-800 hover:bg-amber-200 border border-amber-200 px-4 py-3 rounded-xl font-semibold transition-all shadow-sm flex items-center justify-center gap-2">
                     <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" /></svg>
