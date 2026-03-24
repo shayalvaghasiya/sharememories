@@ -12,9 +12,10 @@ import base64
 import cv2
 import numpy as np
 import zipfile
-from datetime import datetime
+from datetime import datetime, timedelta
 from stream_zip import ZIP_64, stream_zip
-from typing import List, Optional
+from typing import List, Optional, Dict
+from collections import defaultdict
 from celery import Celery
 from fastapi.security import APIKeyHeader
 from fastapi.middleware.cors import CORSMiddleware
@@ -36,9 +37,59 @@ logging.basicConfig(
     handlers=[logging.StreamHandler()]
 )
 logger = logging.getLogger(__name__)
+security_logger = logging.getLogger("security")
 
 MAX_IMAGE_UPLOAD_BYTES = 10 * 1024 * 1024
 GUEST_TOKEN_TTL_SECONDS = 15 * 60
+
+# Security: Suspicious request patterns to block/rate-limit
+SUSPICIOUS_PATTERNS = [
+    "/.git/",
+    "/@fs/",
+    "/etc/",
+    "passwd",
+    "shadow",
+    ".env",
+    "config.php",
+    "__pycache__",
+    ".svn/",
+    ".hg/",
+]
+
+# Track rate limit violations per IP
+class SecurityTracker:
+    def __init__(self):
+        self.violations: Dict[str, List[float]] = defaultdict(list)
+        self.blocked_ips: Dict[str, float] = {}
+        self.violation_window = 300  # 5 minutes
+        self.violation_threshold = 5  # block after 5 violations in 5 min
+        self.block_duration = 600  # block for 10 minutes
+    
+    def is_blocked(self, ip: str) -> bool:
+        if ip not in self.blocked_ips:
+            return False
+        if time.time() - self.blocked_ips[ip] > self.block_duration:
+            del self.blocked_ips[ip]
+            return False
+        return True
+    
+    def log_violation(self, ip: str, pattern: str) -> bool:
+        """Log a security violation. Returns True if IP should be blocked."""
+        now = time.time()
+        # Clean old violations
+        self.violations[ip] = [v for v in self.violations[ip] if now - v < self.violation_window]
+        self.violations[ip].append(now)
+        
+        if len(self.violations[ip]) >= self.violation_threshold:
+            self.blocked_ips[ip] = now
+            security_logger.warning(f"BLOCKED IP {ip} - exceeded violation threshold ({len(self.violations[ip])} violations)")
+            return True
+        
+        security_logger.info(f"Suspicious request from {ip}: {pattern} (violations: {len(self.violations[ip])}/{self.violation_threshold})")
+        return False
+
+
+security_tracker = SecurityTracker()
 
 
 class EventAccessResponse(BaseModel):
@@ -84,10 +135,33 @@ except Exception as e:
 
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
+    client_ip = request.client.host if request.client else "unknown"
+    request_path = request.url.path.lower()
+    
+    # Check if IP is blocked
+    if security_tracker.is_blocked(client_ip):
+        security_logger.warning(f"BLOCKED REQUEST from {client_ip} (IP is rate-limited): {request.method} {request.url.path}")
+        return JSONResponse(
+            status_code=429,
+            content={"detail": "Too many requests. Please try again later."}
+        )
+    
+    # Check for suspicious patterns
+    for pattern in SUSPICIOUS_PATTERNS:
+        if pattern.lower() in request_path:
+            should_block = security_tracker.log_violation(client_ip, pattern)
+            if should_block:
+                return JSONResponse(
+                    status_code=429,
+                    content={"detail": "Too many suspicious requests. Please try again later."}
+                )
+    
     logger.info(f"Incoming request: {request.method} {request.url.path}")
     response = await call_next(request)
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["Referrer-Policy"] = "same-origin"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["X-XSS-Protection"] = "1; mode=block"
     # Allow short-lived browser caching for image previews to improve gallery performance.
     if request.url.path.startswith("/photos/") and request.url.path.endswith("/view"):
         response.headers["Cache-Control"] = "private, max-age=300"
