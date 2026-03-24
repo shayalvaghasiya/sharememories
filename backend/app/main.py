@@ -189,6 +189,13 @@ def persist_guest_upload(event_id: int, filename: Optional[str], content_type: O
     return file_location
 
 
+def is_supported_image_upload(file: UploadFile) -> bool:
+    content_type = (file.content_type or "").lower()
+    if content_type.startswith("image/"):
+        return True
+    return looks_like_heic(file.filename, file.content_type)
+
+
 def require_guest_event_access(event_id: int, access_token: str, db: Session) -> models.Event:
     event = db.query(models.Event).filter(models.Event.event_id == event_id).first()
     if not event:
@@ -701,7 +708,7 @@ def upload_photos(
     
     try:
         for file in files:
-            if not (file.content_type or "").startswith("image/"):
+            if not is_supported_image_upload(file):
                 raise HTTPException(status_code=400, detail="Only image uploads are allowed")
             # Sanitize filename to prevent filesystem errors with special characters
             original_name = file.filename or "upload"
@@ -807,7 +814,7 @@ def search_faces(
 ):
     start_time = time.time()
     require_guest_event_access(event_id, access_token, db)
-    if not (file.content_type or "").startswith("image/"):
+    if not is_supported_image_upload(file):
         raise HTTPException(status_code=400, detail="Only image uploads are allowed")
     logger.info(f"Received search request for file: {file.filename}")
     
