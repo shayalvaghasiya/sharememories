@@ -20,8 +20,21 @@ celery = Celery(__name__, broker=os.getenv("REDIS_URL"), backend=os.getenv("REDI
 app_face = FaceAnalysis(name='buffalo_l', providers=['CPUExecutionProvider'])
 app_face.prepare(ctx_id=0, det_size=(640, 640))
 
+
+def get_required_env(name: str) -> str:
+    value = os.getenv(name)
+    if not value:
+        raise RuntimeError(f"Required environment variable {name} is not set")
+    return value
+
+
+def resolve_storage_path(path: str) -> str:
+    if path.startswith("/storage/"):
+        return path
+    return f"/storage/{path.lstrip('/')}"
+
 def get_drive_token():
-    creds_json = os.getenv("GOOGLE_CREDENTIALS_JSON")
+    creds_json = get_required_env("GOOGLE_CREDENTIALS_JSON")
     creds_dict = json.loads(creds_json)
     
     # Fix escaped newlines in the private key
@@ -59,14 +72,19 @@ def process_photo_task(photo_id: int, file_path: str):
             if photo.drive_file_id:
                 # Fetch original high-res image directly from Drive into memory (if thumbnail missing)
                 token = get_drive_token()
-                res = requests.get(f'https://www.googleapis.com/drive/v3/files/{photo.drive_file_id}?alt=media', headers={'Authorization': f'Bearer {token}'})
+                res = requests.get(
+                    f'https://www.googleapis.com/drive/v3/files/{photo.drive_file_id}?alt=media',
+                    headers={'Authorization': f'Bearer {token}'},
+                    timeout=30,
+                )
                 if res.status_code == 200:
                     nparr = np.frombuffer(res.content, np.uint8)
                     img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
             else:
                 # Fallback to local file for manual uploads
-                if os.path.exists(file_path):
-                    img = cv2.imread(file_path)
+                actual_path = resolve_storage_path(file_path)
+                if os.path.exists(actual_path):
+                    img = cv2.imread(actual_path)
                     
         if img is None:
             photo.processing_status = "failed"

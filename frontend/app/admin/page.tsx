@@ -63,28 +63,6 @@ export default function AdminPage() {
 
   const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
-  useEffect(() => {
-    const checkSession = async () => {
-      const session = sessionStorage.getItem("adminSession");
-      if (session) {
-        const { token, expiry } = JSON.parse(session);
-        if (new Date().getTime() < expiry) {
-          setPassword(token);
-          setIsAuthenticated(true);
-          try {
-            await axios.get(`${apiUrl}/admin/db-status`, { headers: { "X-API-Key": token } });
-          } catch (e) {
-            setIsAuthenticated(false);
-            sessionStorage.removeItem("adminSession");
-          }
-        } else {
-          sessionStorage.removeItem("adminSession");
-        }
-      }
-    };
-    checkSession();
-  }, [apiUrl]);
-
   const fetchEvents = useCallback(async () => {
     try {
       const response = await axios.get(`${apiUrl}/events`, { headers: { "X-API-Key": password } });
@@ -360,10 +338,6 @@ export default function AdminPage() {
               axios.get(`${apiUrl}/admin/db-status`, { headers: { "X-API-Key": password } })
                 .then(() => {
                   setIsAuthenticated(true);
-                  sessionStorage.setItem("adminSession", JSON.stringify({
-                    token: password,
-                    expiry: new Date().getTime() + 2 * 60 * 60 * 1000 // 2 hours
-                  }));
                 })
                 .catch((error) => {
                   console.error("Login error:", error);
@@ -417,11 +391,10 @@ export default function AdminPage() {
           </div>
           <div className="flex items-center gap-2">
             <button
-              onClick={() => {
-                sessionStorage.removeItem("adminSession");
-                setIsAuthenticated(false);
-                setPassword("");
-              }}
+                      onClick={() => {
+                        setIsAuthenticated(false);
+                        setPassword("");
+                      }}
               className="px-4 py-2 text-sm text-red-500 hover:bg-red-50 rounded-full transition-colors"
             >
               Logout

@@ -9,6 +9,7 @@ type ViewState = "login" | "search" | "results";
 export default function Home() {
   // App State
   const [view, setView] = useState<ViewState>("login");
+  const [accessToken, setAccessToken] = useState<string | null>(null);
 
   // Login State
   const [eventCode, setEventCode] = useState("");
@@ -62,6 +63,8 @@ export default function Home() {
     setCheckingEvent(true);
     try {
       await axios.get(`${apiUrl}/events/${code}`);
+      const accessResponse = await axios.post(`${apiUrl}/events/${code}/access`);
+      setAccessToken(accessResponse.data.access_token);
       setView("search");
     } catch (error) {
       console.error(error);
@@ -78,6 +81,8 @@ export default function Home() {
     // Validate Event Code against Backend
     try {
       await axios.get(`${apiUrl}/events/${eventCode}`);
+      const accessResponse = await axios.post(`${apiUrl}/events/${eventCode}/access`);
+      setAccessToken(accessResponse.data.access_token);
       setView("search");
     } catch (error) {
       console.error(error);
@@ -126,7 +131,8 @@ export default function Home() {
 
     try {
       const photoIds = photosToDownload.map((p) => p.photo_id).join(",");
-      const downloadUrl = `${apiUrl}/events/${eventCode}/download-zip?photo_ids=${photoIds}`;
+      if (!accessToken) throw new Error("Missing event access token");
+      const downloadUrl = `${apiUrl}/events/${eventCode}/download-zip?photo_ids=${photoIds}&access_token=${encodeURIComponent(accessToken)}`;
 
       // Stream directly to the browser's download manager instead of buffering in memory
       const a = document.createElement("a");
@@ -174,6 +180,12 @@ export default function Home() {
     const formData = new FormData();
     formData.append("file", selectedFile);
     formData.append("event_id", eventCode);
+    if (!accessToken) {
+      setSearchError("Event access expired. Please re-enter the event.");
+      setLoading(false);
+      return;
+    }
+    formData.append("access_token", accessToken);
 
     try {
       // Post directly to the backend to bypass the Next.js proxy, which can time out
@@ -212,6 +224,7 @@ export default function Home() {
               <button
                 onClick={() => {
                   setView("login");
+                  setAccessToken(null);
                   window.history.pushState({}, '', '/');
                 }}
                 className="text-sm text-red-500 hover:bg-red-50 px-3 py-1 rounded-full transition-colors"

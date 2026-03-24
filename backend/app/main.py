@@ -6,17 +6,19 @@ import json
 import requests
 import uuid
 import logging
+import hmac
+import hashlib
+import base64
 import cv2
 import numpy as np
 import zipfile
 from datetime import datetime
 from stream_zip import ZIP_64, stream_zip
-from typing import List
+from typing import List, Optional
 from celery import Celery
 from fastapi.security import APIKeyHeader
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Request, Form, BackgroundTasks, Security
-from fastapi.staticfiles import StaticFiles
 from fastapi.responses import StreamingResponse, JSONResponse, FileResponse
 from insightface.app import FaceAnalysis
 from sqlalchemy.orm import Session
@@ -33,6 +35,9 @@ logging.basicConfig(
     handlers=[logging.StreamHandler()]
 )
 logger = logging.getLogger(__name__)
+
+MAX_IMAGE_UPLOAD_BYTES = 10 * 1024 * 1024
+GUEST_TOKEN_TTL_SECONDS = 15 * 60
 
 class NumpyEncoder(json.JSONEncoder):
     """Custom encoder for numpy data types"""
@@ -56,9 +61,9 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[frontend_url, "http://localhost:3000"], 
     allow_origin_regex=r"https://.*\.app\.github\.dev",
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "DELETE"],
+    allow_headers=["Content-Type", "X-API-Key"],
     expose_headers=["Content-Disposition"],
 )
 
@@ -70,21 +75,90 @@ try:
 except Exception as e:
     logger.error(f"Error checking/creating /storage: {e}")
 
-app.mount("/static", StaticFiles(directory="/storage"), name="static")
-
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
-    logger.info(f"Incoming request: {request.method} {request.url}")
+    logger.info(f"Incoming request: {request.method} {request.url.path}")
     response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["Referrer-Policy"] = "same-origin"
+    response.headers["Cache-Control"] = "no-store"
     return response
 
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
+
+def get_required_env(name: str) -> str:
+    value = os.getenv(name)
+    if not value:
+        raise RuntimeError(f"Required environment variable {name} is not set")
+    return value
+
+
+def get_app_secret() -> str:
+    return get_required_env("APP_SECRET_KEY")
+
 def verify_admin(api_key: str = Security(api_key_header)):
-    expected_key = os.getenv("ADMIN_PASSWORD", "admin123")
-    if not api_key or api_key != expected_key:
+    expected_key = get_required_env("ADMIN_PASSWORD")
+    if not api_key or not hmac.compare_digest(api_key, expected_key):
         raise HTTPException(status_code=403, detail="Invalid Admin API Key")
     return api_key
+
+
+def make_guest_access_token(event_id: int, expires_at: Optional[int] = None) -> str:
+    if expires_at is None:
+        expires_at = int(time.time()) + GUEST_TOKEN_TTL_SECONDS
+    payload = f"{event_id}:{expires_at}"
+    signature = hmac.new(get_app_secret().encode("utf-8"), payload.encode("utf-8"), hashlib.sha256).hexdigest()
+    token = f"{payload}:{signature}"
+    return base64.urlsafe_b64encode(token.encode("utf-8")).decode("utf-8")
+
+
+def verify_guest_access_token(event_id: int, access_token: str) -> None:
+    try:
+        decoded = base64.urlsafe_b64decode(access_token.encode("utf-8")).decode("utf-8")
+        token_event_id, expires_at, signature = decoded.split(":", 2)
+        if int(token_event_id) != event_id:
+            raise ValueError("Event mismatch")
+        expected_payload = f"{token_event_id}:{expires_at}"
+        expected_signature = hmac.new(
+            get_app_secret().encode("utf-8"),
+            expected_payload.encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+        if not hmac.compare_digest(signature, expected_signature):
+            raise ValueError("Invalid signature")
+        if int(expires_at) < int(time.time()):
+            raise ValueError("Expired token")
+    except Exception as exc:
+        raise HTTPException(status_code=403, detail="Invalid or expired access token") from exc
+
+
+def resolve_storage_path(path: str) -> str:
+    if path.startswith("/storage/"):
+        return path
+    return f"/storage/{path.lstrip('/')}"
+
+
+def read_upload_limited(file: UploadFile, max_bytes: int) -> bytes:
+    chunks = []
+    size = 0
+    while True:
+        chunk = file.file.read(1024 * 1024)
+        if not chunk:
+            break
+        size += len(chunk)
+        if size > max_bytes:
+            raise HTTPException(status_code=413, detail=f"File exceeds {max_bytes // (1024 * 1024)} MB limit")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def require_guest_event_access(event_id: int, access_token: str, db: Session) -> models.Event:
+    event = db.query(models.Event).filter(models.Event.event_id == event_id).first()
+    if not event:
+        raise HTTPException(status_code=404, detail="Event not found")
+    verify_guest_access_token(event_id, access_token)
+    return event
 
 # Global variable for InsightFace model
 app_face = None
@@ -116,6 +190,8 @@ def get_drive_token():
 # Create tables and enable vector extension on startup
 @app.on_event("startup")
 def startup_event():
+    get_required_env("ADMIN_PASSWORD")
+    get_required_env("APP_SECRET_KEY")
     # Retry logic to wait for database to be ready
     max_retries = 5
     for i in range(max_retries):
@@ -185,6 +261,18 @@ def get_event(event_id: int, db: Session = Depends(database.get_db)):
         raise HTTPException(status_code=404, detail="Event not found")
     return event
 
+
+@app.post("/events/{event_id}/access", response_model=EventAccessResponse)
+def get_event_access(event_id: int, db: Session = Depends(database.get_db)):
+    event = db.query(models.Event).filter(models.Event.event_id == event_id).first()
+    if not event:
+        raise HTTPException(status_code=404, detail="Event not found")
+    return EventAccessResponse(
+        event_id=event_id,
+        access_token=make_guest_access_token(event_id),
+        expires_in=GUEST_TOKEN_TTL_SECONDS,
+    )
+
 @app.post("/events/{event_id}/visit")
 def record_visit(event_id: int, request: Request, db: Session = Depends(database.get_db)):
     """Endpoint for guests to ping periodically to register as active users."""
@@ -237,6 +325,12 @@ class ConfirmUploadRequest(BaseModel):
 class SyncDriveRequest(BaseModel):
     folder_url: str
 
+
+class EventAccessResponse(BaseModel):
+    event_id: int
+    access_token: str
+    expires_in: int
+
 def process_drive_sync(event_id: int, files: list):
     db: Session = database.SessionLocal()
     try:
@@ -258,13 +352,13 @@ def process_drive_sync(event_id: int, files: list):
                 try:
                     # Download image into memory
                     dl_url = f"https://www.googleapis.com/drive/v3/files/{file_id}?alt=media"
-                    dl_res = requests.get(dl_url, headers=headers)
+                    dl_res = requests.get(dl_url, headers=headers, timeout=30)
                     
                     if dl_res.status_code == 401:
                         logger.info("Google Drive token expired. Refreshing...")
                         token = get_drive_token()
                         headers = {"Authorization": f"Bearer {token}"}
-                        dl_res = requests.get(dl_url, headers=headers)
+                        dl_res = requests.get(dl_url, headers=headers, timeout=30)
 
                     if dl_res.status_code != 200:
                         logger.error(f"Failed to download {file_id}: {dl_res.status_code}")
@@ -343,13 +437,13 @@ def repair_missing_photos():
                 
                 # Download
                 dl_url = f"https://www.googleapis.com/drive/v3/files/{p.drive_file_id}?alt=media"
-                dl_res = requests.get(dl_url, headers=headers)
+                dl_res = requests.get(dl_url, headers=headers, timeout=30)
                 
                 if dl_res.status_code == 401:
                     logger.info("Google Drive token expired during repair. Refreshing...")
                     token = get_drive_token()
                     headers = {"Authorization": f"Bearer {token}"}
-                    dl_res = requests.get(dl_url, headers=headers)
+                    dl_res = requests.get(dl_url, headers=headers, timeout=30)
 
                 if dl_res.status_code == 200:
                     nparr = np.frombuffer(dl_res.content, np.uint8)
@@ -414,7 +508,7 @@ def sync_drive_folder(
         if page_token:
             url += f"&pageToken={page_token}"
             
-        res = requests.get(url, headers=headers)
+        res = requests.get(url, headers=headers, timeout=30)
         if res.status_code != 200:
             raise HTTPException(status_code=400, detail=f"Failed to access Google Drive folder: {res.text}")
             
@@ -440,17 +534,28 @@ def sync_drive_folder(
     return {"message": "Sync started", "synced_count": 0, "total_found": len(files), "new_found": len(new_files)}
 
 @app.get("/photos/{photo_id}/download")
-def download_photo(photo_id: int, db: Session = Depends(database.get_db)):
+def download_photo(
+    photo_id: int,
+    access_token: Optional[str] = None,
+    api_key: Optional[str] = Security(api_key_header),
+    db: Session = Depends(database.get_db),
+):
     photo = db.query(models.Photo).filter(models.Photo.photo_id == photo_id).first()
     if not photo:
         raise HTTPException(status_code=404, detail="Photo not found")
+    if not api_key:
+        if not access_token:
+            raise HTTPException(status_code=403, detail="Access token required")
+        verify_guest_access_token(photo.event_id, access_token)
+    else:
+        verify_admin(api_key)
         
     if photo.drive_file_id:
         token = get_drive_token()
         headers = {"Authorization": f"Bearer {token}"}
         dl_url = f"https://www.googleapis.com/drive/v3/files/{photo.drive_file_id}?alt=media"
         
-        res = requests.get(dl_url, headers=headers, stream=True)
+        res = requests.get(dl_url, headers=headers, stream=True, timeout=30)
         if res.status_code != 200:
             raise HTTPException(status_code=res.status_code, detail="Failed to fetch from Google Drive")
             
@@ -460,7 +565,7 @@ def download_photo(photo_id: int, db: Session = Depends(database.get_db)):
             headers={"Content-Disposition": f'attachment; filename="photo_{photo_id}.jpg"'}
         )
     elif photo.file_path:
-        actual_path = photo.file_path if photo.file_path.startswith("/") else f"/storage/{photo.file_path}"
+        actual_path = resolve_storage_path(photo.file_path)
         if os.path.exists(actual_path):
             return FileResponse(
                 path=actual_path,
@@ -470,12 +575,31 @@ def download_photo(photo_id: int, db: Session = Depends(database.get_db)):
             
     raise HTTPException(status_code=404, detail="File not found on server")
 
+@app.get("/photos/{photo_id}/view")
+def view_photo(
+    photo_id: int,
+    access_token: str,
+    db: Session = Depends(database.get_db),
+):
+    photo = db.query(models.Photo).filter(models.Photo.photo_id == photo_id).first()
+    if not photo:
+        raise HTTPException(status_code=404, detail="Photo not found")
+    verify_guest_access_token(photo.event_id, access_token)
+
+    actual_path = resolve_storage_path(photo.thumbnail_path or photo.file_path)
+    if not os.path.exists(actual_path):
+        raise HTTPException(status_code=404, detail="File not found on server")
+    return FileResponse(path=actual_path, media_type="image/jpeg", filename=f"photo_{photo_id}.jpg")
+
+
 @app.get("/events/{event_id}/download-zip")
 def download_photos_zip(
     event_id: int, 
     photo_ids: str, 
+    access_token: str,
     db: Session = Depends(database.get_db)
 ):
+    require_guest_event_access(event_id, access_token, db)
     ids = [int(i) for i in photo_ids.split(",") if i.isdigit()]
     if not ids:
         raise HTTPException(status_code=400, detail="No photo IDs provided")
@@ -496,11 +620,11 @@ def download_photos_zip(
                 if photo.drive_file_id:
                     dl_url = f"https://www.googleapis.com/drive/v3/files/{photo.drive_file_id}?alt=media"
                     # Stream from Google Drive directly into the ZIP chunk
-                    with requests.get(dl_url, headers=headers, stream=True) as res:
+                    with requests.get(dl_url, headers=headers, stream=True, timeout=30) as res:
                         if res.status_code == 200:
                             yield filename, now, 0o600, ZIP_64, res.iter_content(chunk_size=65536)
                 elif photo.file_path:
-                    actual_path = photo.file_path if photo.file_path.startswith("/") else f"/storage/{photo.file_path.lstrip('/')}"
+                    actual_path = resolve_storage_path(photo.file_path)
                     if os.path.exists(actual_path):
                         def file_chunks():
                             with open(actual_path, "rb") as f:
@@ -540,25 +664,34 @@ def upload_photos(
     
     try:
         for file in files:
+            if not (file.content_type or "").startswith("image/"):
+                raise HTTPException(status_code=400, detail="Only image uploads are allowed")
             # Sanitize filename to prevent filesystem errors with special characters
             original_name = file.filename or "upload"
             safe_filename = "".join([c for c in original_name if c.isalpha() or c.isdigit() or c in (' ', '.', '_', '-')]).strip()
             # If filename becomes empty after sanitization, give it a generic name
             if not safe_filename:
                 safe_filename = f"image_{int(time.time())}_{uuid.uuid4().hex[:8]}.jpg"
-            
-            file_location = f"{storage_path}/{safe_filename}"
+
+            file_location = f"{storage_path}/{uuid.uuid4().hex}_{safe_filename}"
+            relative_path = file_location.replace("/storage/", "", 1) if file_location.startswith("/storage/") else file_location
             logger.info(f"Saving file to {file_location}")
             
             # Save to disk
-            # Revert to shutil.copyfileobj for better memory usage
-            # and ensure we are at the start of the file
             file.file.seek(0)
+            size = 0
             with open(file_location, "wb+") as buffer:
-                shutil.copyfileobj(file.file, buffer)
+                while True:
+                    chunk = file.file.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    size += len(chunk)
+                    if size > MAX_IMAGE_UPLOAD_BYTES:
+                        raise HTTPException(status_code=413, detail="Image exceeds 10 MB limit")
+                    buffer.write(chunk)
                 
             # Save to DB
-            new_photo = models.Photo(event_id=event_id, file_path=file_location)
+            new_photo = models.Photo(event_id=event_id, file_path=relative_path)
             new_photos.append(new_photo)
             
         # Bulk save to DB to significantly speed up waiting time after upload
@@ -568,7 +701,7 @@ def upload_photos(
         for new_photo in new_photos:
             db.refresh(new_photo)
             # Queue for AI Processing (Phase 4)
-            celery_client.send_task("process_photo_task", args=[new_photo.photo_id, file_location])
+            celery_client.send_task("process_photo_task", args=[new_photo.photo_id, resolve_storage_path(new_photo.file_path)])
             saved_photos.append(new_photo.photo_id)
             
         logger.info(f"Successfully uploaded {len(saved_photos)} photos.")
@@ -586,20 +719,30 @@ def get_event_photos(event_id: int, db: Session = Depends(database.get_db)):
 @app.delete("/photos/{photo_id}", dependencies=[Depends(verify_admin)])
 def delete_photo(photo_id: int, db: Session = Depends(database.get_db)):
     photo = db.query(models.Photo).filter(models.Photo.photo_id == photo_id).first()
+    if not photo:
+        raise HTTPException(status_code=404, detail="Photo not found")
     try:
         # Delete from local storage if exists
-        if photo.file_path and os.path.exists(photo.file_path):
-            os.remove(photo.file_path)
-            logger.info(f"Deleted local file: {photo.file_path}")
+        if photo.file_path:
+            actual_file_path = resolve_storage_path(photo.file_path)
+            if os.path.exists(actual_file_path):
+                os.remove(actual_file_path)
+                logger.info(f"Deleted local file: {actual_file_path}")
             
-        if photo.thumbnail_path and os.path.exists(photo.thumbnail_path):
-            os.remove(photo.thumbnail_path)
-            logger.info(f"Deleted local thumbnail: {photo.thumbnail_path}")
+        if photo.thumbnail_path:
+            actual_thumbnail_path = resolve_storage_path(photo.thumbnail_path)
+            if os.path.exists(actual_thumbnail_path):
+                os.remove(actual_thumbnail_path)
+                logger.info(f"Deleted local thumbnail: {actual_thumbnail_path}")
 
         # Delete from Google Drive if it was a drive file
         if photo.drive_file_id:
             token = get_drive_token()
-            requests.delete(f'https://www.googleapis.com/drive/v3/files/{photo.drive_file_id}', headers={'Authorization': f'Bearer {token}'})
+            requests.delete(
+                f'https://www.googleapis.com/drive/v3/files/{photo.drive_file_id}',
+                headers={'Authorization': f'Bearer {token}'},
+                timeout=30,
+            )
     except Exception as e:
         logger.error(f"Error deleting files for photo {photo_id}: {e}")
         
@@ -610,14 +753,18 @@ def delete_photo(photo_id: int, db: Session = Depends(database.get_db)):
 @app.post("/search")
 def search_faces(
     event_id: int = Form(...),
+    access_token: str = Form(...),
     file: UploadFile = File(...), 
     db: Session = Depends(database.get_db)
 ):
     start_time = time.time()
+    require_guest_event_access(event_id, access_token, db)
+    if not (file.content_type or "").startswith("image/"):
+        raise HTTPException(status_code=400, detail="Only image uploads are allowed")
     logger.info(f"Received search request for file: {file.filename}")
     
     # Read image file from upload
-    contents = file.file.read()
+    contents = read_upload_limited(file, MAX_IMAGE_UPLOAD_BYTES)
     logger.info(f"File read complete. Size: {len(contents) / 1024 / 1024:.2f} MB")
 
     nparr = np.frombuffer(contents, np.uint8)
@@ -669,8 +816,8 @@ def search_faces(
     matches = [
         {
             "photo_id": photo.photo_id, 
-            "url": f"/static/{photo.file_path}", 
-            "download_url": f"/photos/{photo.photo_id}/download"
+            "url": f"/photos/{photo.photo_id}/view?access_token={access_token}",
+            "download_url": f"/photos/{photo.photo_id}/download?access_token={access_token}"
         } 
         for photo in results
     ]
@@ -797,10 +944,16 @@ class ImportResult(BaseModel):
 
 
 @app.post("/admin/db-import", response_model=ImportResult, dependencies=[Depends(verify_admin)])
-async def import_database(file: UploadFile = File(...), db: Session = Depends(database.get_db)):
+async def import_database(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    db: Session = Depends(database.get_db),
+):
     """Imports a JSON snapshot to restore database state."""
     logger.info("Importing database snapshot...")
     try:
+        if file.content_type not in {"application/json", "text/json"}:
+            raise HTTPException(status_code=400, detail="Import file must be JSON")
         content = await file.read()
         snapshot = json.loads(content)
 
