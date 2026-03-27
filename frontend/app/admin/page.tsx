@@ -92,6 +92,7 @@ export default function AdminPage() {
   // Visitors State
   const [visitors, setVisitors] = useState<Visitor[]>([]);
   const [showVisitors, setShowVisitors] = useState(false);
+  const hasInitialDataLoaded = useRef(false);
 
   const apiUrl = useMemo(() => resolveApiUrl(), []);
 
@@ -140,6 +141,24 @@ export default function AdminPage() {
       fetchEventPhotos(getEventId(selectedEvent));
     }
   }, [selectedEvent, fetchEventPhotos]);
+
+  // Load dashboard data once after login, then rely on manual refresh actions.
+  useEffect(() => {
+    if (!isAuthenticated || selectedEvent || hasInitialDataLoaded.current) {
+      return;
+    }
+
+    hasInitialDataLoaded.current = true;
+    fetchEvents();
+    fetchDbStatus();
+    fetchVisitors();
+  }, [isAuthenticated, selectedEvent, fetchEvents, fetchDbStatus, fetchVisitors]);
+
+  useEffect(() => {
+    if (!isAuthenticated) {
+      hasInitialDataLoaded.current = false;
+    }
+  }, [isAuthenticated]);
 
   const handleCreateEvent = async (e: React.MouseEvent) => {
     e.preventDefault();
