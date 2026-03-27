@@ -141,27 +141,6 @@ export default function AdminPage() {
     }
   }, [selectedEvent, fetchEventPhotos]);
 
-  useEffect(() => {
-    fetchEvents();
-  }, [fetchEvents]);
-
-  // Fetch DB status when authenticated and on main view
-  useEffect(() => {
-    if (isAuthenticated && !selectedEvent) {
-      fetchDbStatus();
-    }
-  }, [isAuthenticated, selectedEvent, fetchDbStatus]);
-
-  // Fetch visitors if panel is open
-  useEffect(() => {
-    if (isAuthenticated && !selectedEvent && showVisitors) {
-      fetchVisitors();
-      // Auto-refresh visitors every 30 seconds
-      const interval = setInterval(fetchVisitors, 30000);
-      return () => clearInterval(interval);
-    }
-  }, [isAuthenticated, selectedEvent, showVisitors, fetchVisitors]);
-
   const handleCreateEvent = async (e: React.MouseEvent) => {
     e.preventDefault();
     if (!newEventName.trim()) return;

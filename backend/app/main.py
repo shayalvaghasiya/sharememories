@@ -477,14 +477,43 @@ def record_visit(event_id: int, request: Request, db: Session = Depends(database
 
 @app.get("/admin/visitors", dependencies=[Depends(verify_admin)])
 def get_visitors(db: Session = Depends(database.get_db)):
-    """Retrieves all visitors for the admin dashboard."""
+    """Retrieves visitors for the admin dashboard, deduplicated by IP address."""
     visitors = db.query(models.Visitor, models.Event.event_name)\
                  .join(models.Event, models.Visitor.event_id == models.Event.event_id)\
                  .order_by(models.Visitor.last_seen.desc()).all()
     
     now = datetime.now()
-    # We consider a user "Active" if they have pinged within the last 5 minutes (300 seconds)
-    return [{ "id": v.id, "event_id": v.event_id, "event_name": event_name, "ip_address": v.ip_address, "user_agent": v.user_agent, "first_seen": v.first_seen.isoformat() if v.first_seen else None, "last_seen": v.last_seen.isoformat() if v.last_seen else None, "is_active": (now - v.last_seen).total_seconds() < 300 } for v, event_name in visitors]
+    unique_visitors: Dict[str, Dict[str, object]] = {}
+
+    # Rows are sorted by latest last_seen first, so first entry per IP is the freshest one.
+    for v, event_name in visitors:
+        ip = v.ip_address or "unknown"
+
+        if ip not in unique_visitors:
+            is_active = bool(v.last_seen and (now - v.last_seen).total_seconds() < 300)
+            unique_visitors[ip] = {
+                "id": v.id,
+                "event_id": v.event_id,
+                "event_name": event_name,
+                "ip_address": ip,
+                "user_agent": v.user_agent,
+                "first_seen": v.first_seen.isoformat() if v.first_seen else None,
+                "last_seen": v.last_seen.isoformat() if v.last_seen else None,
+                "is_active": is_active,
+                "_event_names": set(),
+            }
+
+        if event_name:
+            unique_visitors[ip]["_event_names"].add(event_name)
+
+    response = []
+    for visitor_data in unique_visitors.values():
+        event_names = sorted(visitor_data.pop("_event_names"))
+        if event_names:
+            visitor_data["event_name"] = ", ".join(event_names)
+        response.append(visitor_data)
+
+    return response
 
 class FileInfo(BaseModel):
     filename: str

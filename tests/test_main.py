@@ -1,5 +1,6 @@
 import pytest
 from unittest.mock import patch, MagicMock, ANY
+from datetime import datetime, timedelta
 from app import models
 
 class MockQuery:
@@ -185,3 +186,51 @@ def test_reset_system(mock_exists, mock_rmtree, client, mock_db_session):
     mock_db_session.execute.assert_called_once()
     mock_db_session.commit.assert_called_once()
     assert mock_rmtree.call_count == 2
+
+
+def test_admin_visitors_deduplicates_by_ip(client, mock_db_session, monkeypatch):
+    monkeypatch.setenv("ADMIN_PASSWORD", "test-admin")
+
+    now = datetime.now()
+    latest = models.Visitor(
+        id=2,
+        event_id=2,
+        ip_address="1.2.3.4",
+        user_agent="UA-new",
+        first_seen=now - timedelta(minutes=15),
+        last_seen=now - timedelta(minutes=1),
+    )
+    older = models.Visitor(
+        id=1,
+        event_id=1,
+        ip_address="1.2.3.4",
+        user_agent="UA-old",
+        first_seen=now - timedelta(minutes=30),
+        last_seen=now - timedelta(minutes=10),
+    )
+    another_ip = models.Visitor(
+        id=3,
+        event_id=3,
+        ip_address="5.6.7.8",
+        user_agent="UA-other",
+        first_seen=now - timedelta(minutes=20),
+        last_seen=now - timedelta(minutes=7),
+    )
+
+    # Query rows are ordered by last_seen DESC, matching endpoint query behavior.
+    mock_db_session.query.return_value = MockQuery([
+        (latest, "Reception"),
+        (older, "Ceremony"),
+        (another_ip, "After Party"),
+    ])
+
+    response = client.get("/admin/visitors", headers={"X-API-Key": "test-admin"})
+
+    assert response.status_code == 200
+    data = response.json()
+
+    assert len(data) == 2
+    first_entry = data[0]
+    assert first_entry["ip_address"] == "1.2.3.4"
+    assert first_entry["event_name"] == "Ceremony, Reception"
+    assert first_entry["is_active"] is True

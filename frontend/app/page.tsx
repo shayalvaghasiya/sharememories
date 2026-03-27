@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 import axios from "axios";
 import Link from "next/link";
 
@@ -86,6 +86,7 @@ export default function Home({ initialEventCode }: HomeProps = {}) {
   const [isSelectMode, setIsSelectMode] = useState(false);
   const [isDownloading, setIsDownloading] = useState(false);
   const [downloadProgress, setDownloadProgress] = useState({ current: 0, total: 0 });
+  const visitTrackedForEvent = useRef<string | null>(null);
   const apiUrl = useMemo(() => resolveApiUrl(), []);
 
   useEffect(() => {
@@ -108,16 +109,10 @@ export default function Home({ initialEventCode }: HomeProps = {}) {
 
   // --- Visitor Tracking Hook ---
   useEffect(() => {
-    if (view !== "login" && eventCode) {
-      // Initial check-in when entering the event
+    if (view !== "login" && eventCode && visitTrackedForEvent.current !== eventCode) {
+      // Register a single check-in when a guest enters an event.
       axios.post(`${apiUrl}/events/${eventCode}/visit`).catch(() => {});
-      
-      // Ping every 1 minute to keep session "Active"
-      const interval = setInterval(() => {
-        axios.post(`${apiUrl}/events/${eventCode}/visit`).catch(() => {});
-      }, 60000);
-      
-      return () => clearInterval(interval);
+      visitTrackedForEvent.current = eventCode;
     }
   }, [view, eventCode, apiUrl]);
 
