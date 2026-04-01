@@ -38,8 +38,10 @@ services:
       DB_POOL_TIMEOUT: 60
       DB_POOL_RECYCLE: 1800
       REDIS_URL: redis://redis:6379/0
-    env_file:
-      - ./backend/.env
+      GOOGLE_CREDENTIALS_JSON: ${GOOGLE_CREDENTIALS_JSON}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD}
+      APP_SECRET_KEY: ${APP_SECRET_KEY}
+      FRONTEND_URL: ${FRONTEND_URL}
     restart: always
 
   worker:
@@ -55,15 +57,22 @@ services:
       PYTHONUNBUFFERED: 1
       DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD_ENCODED}@db:5432/${POSTGRES_DB}
       REDIS_URL: redis://redis:6379/0
-    env_file:
-      - ./backend/.env
+      GOOGLE_CREDENTIALS_JSON: ${GOOGLE_CREDENTIALS_JSON}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD}
+      APP_SECRET_KEY: ${APP_SECRET_KEY}
+      FRONTEND_URL: ${FRONTEND_URL}
     restart: always
 
   frontend:
-    build: ./frontend
+    build:
+      context: ./frontend
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL}
     container_name: wedding_frontend
     ports:
       - "3000:3000"
+    environment:
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL}
     restart: always
 
 

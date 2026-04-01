@@ -33,16 +33,94 @@ An AI-powered web application that allows wedding guests to find all their photo
 
 - Docker Desktop installed and running.
 
+## ⚙️ Configuration
+
+### Environment Setup
+
+The application uses a single consolidated `.env` file at the root level. All environment variables for the backend, frontend, and database are configured here.
+
+**Step 1: Create your .env file**
+
+Copy the example configuration:
+```bash
+cp .env.example .env
+```
+
+**Step 2: Update the .env file with your values**
+
+Edit `.env` and configure the following variables:
+
+#### Database Configuration
+```env
+# PostgreSQL credentials (used by Docker Compose)
+POSTGRES_USER=admin                          # Database username
+POSTGRES_PASSWORD=postgres@admin             # Database password
+POSTGRES_PASSWORD_ENCODED=postgres%40admin  # URL-encoded version of password
+POSTGRES_DB=wedding_db                       # Database name
+```
+
+#### Backend Configuration
+```env
+# Google Cloud credentials (optional, for cloud storage integration)
+GOOGLE_CREDENTIALS_JSON='...'
+
+# Admin password for the admin panel
+ADMIN_PASSWORD=YourSecurePassword123
+
+# Secret key for JWT tokens and sessions (generate a random string)
+APP_SECRET_KEY=your-secret-key-here
+
+# Frontend URL (for CORS configuration)
+FRONTEND_URL=http://localhost:3000          # For development
+```
+
+#### Frontend Configuration
+```env
+# Backend API URL accessible from the browser
+NEXT_PUBLIC_API_URL=http://localhost:8000   # For development
+```
+
+### Important Notes
+
+⚠️ **Security Warning**: 
+- Never commit the `.env` file to version control (it's in `.gitignore`)
+- Use strong, random values for `ADMIN_PASSWORD` and `APP_SECRET_KEY`
+- Rotate credentials regularly in production
+
+### Generating a Secure Secret Key
+
+```bash
+# On Linux/Mac:
+python3 -c "import secrets; print(secrets.token_hex(32))"
+
+# Or using OpenSSL:
+openssl rand -hex 32
+```
+
+### URL Configuration for Different Environments
+
+**Local Development:**
+```env
+FRONTEND_URL=http://localhost:3000
+NEXT_PUBLIC_API_URL=http://localhost:8000
+```
+
 ## ⚡ Quick Start
 
-1. **Start the Application**
+1. **Create and configure .env file**
+   ```bash
+   cp .env.example .env
+   # Edit .env with your settings
+   ```
+
+2. **Start the Application**
    Run the entire stack with Docker Compose:
    ```bash
    docker-compose up --build
    ```
    *Note: The first run will take a few minutes to download the AI models (~300MB).*
 
-2. **Access the Interfaces**
+3. **Access the Interfaces**
    - **Frontend (User & Admin)**: http://localhost:3000
    - **Backend API Docs**: http://localhost:8000/docs
 
@@ -93,6 +171,8 @@ wedding-ai/
 │   │       └── page.tsx     # Admin Upload UI
 │   └── next.config.mjs
 ├── storage/                 # Local storage for uploaded photos
+├── .env                     # Environment configuration (create from .env.example)
+├── .env.example             # Example configuration template
 ├── docker-compose.yml       # Infrastructure orchestration
 └── README.md
 ```
