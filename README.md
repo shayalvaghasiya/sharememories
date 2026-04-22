@@ -237,6 +237,8 @@ wedding-ai/
       caddy:2
 
   
+  <!-- application postgres db -->
+
   docker run -d \
   --name wedding_db \
   --network sharememories_net \
@@ -247,6 +249,7 @@ wedding-ai/
   -v /opt/sharememories/db_data:/var/lib/postgresql/data \
   pgvector/pgvector:pg16
 
+  <!-- APPLICATION REDIS  -->
 
   docker run -d \
   --name wedding_redis \
