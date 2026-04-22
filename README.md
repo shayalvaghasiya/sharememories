@@ -236,3 +236,20 @@ wedding-ai/
       -v caddy_config:/config \
       caddy:2
 
+  
+  docker run -d \
+  --name wedding_db \
+  --network sharememories_net \
+  --restart always \
+  -e POSTGRES_USER=admin \
+  -e POSTGRES_PASSWORD=postgres@admin \
+  -e POSTGRES_DB=wedding_db \
+  -v /opt/sharememories/db_data:/var/lib/postgresql/data \
+  pgvector/pgvector:pg16
+
+
+  docker run -d \
+  --name wedding_redis \
+  --network sharememories_net \
+  --restart always \
+  redis:alpine
